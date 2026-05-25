@@ -106,7 +106,7 @@ local CONFIG = {
     CASH_SAFETY_BUFFER = 0,     -- nambah X biar gak kepepet (mis: 5)
     -- Harga unit. Kalau unit gak ada di sini = anggap harga 0 (place bebas).
     UNIT_PRICES = {
-        ["unit_tomato_plant"] = 75,
+        ["unit_tomato_plant"] = 100,
         -- contoh lain (sesuaikan):
         -- ["unit_corn_cannon"]    = 150,
         -- ["unit_pepper_thrower"] = 200,
