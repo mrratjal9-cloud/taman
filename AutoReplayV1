@@ -1,0 +1,230 @@
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local AUTO_START = true -- Ubah ke false jika ingin script mati saat pertama kali dieksekusi
+print("kates")
+-- ==========================================
+-- VARIABLES & GUI SETUP
+-- ==========================================
+local isRunning = AUTO_START
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- Menghapus GUI lama jika dieksekusi ulang
+if CoreGui:FindFirstChild("AutoRestartGUI") then
+    CoreGui.AutoRestartGUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoRestartGUI"
+ScreenGui.Parent = CoreGui
+
+-- Main Frame
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 250, 0, 120)
+-- Posisi diubah ke Paling Kanan, Tengah
+MainFrame.Position = UDim2.new(1, -260, 0.5, -60) 
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = MainFrame
+
+-- Top Bar (Untuk Dragging)
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+
+local TopBarCorner = Instance.new("UICorner")
+TopBarCorner.CornerRadius = UDim.new(0, 8)
+TopBarCorner.Parent = TopBar
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Restart & Vote"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+-- Close Button
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+-- Minimize Button
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+-- Content Frame
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+-- Toggle Button
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.8, 0, 0, 40)
+ToggleBtn.Position = UDim2.new(0.1, 0, 0.5, -20)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 16
+ToggleBtn.Parent = ContentFrame
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 6)
+ToggleCorner.Parent = ToggleBtn
+
+-- ==========================================
+-- DRAG SYSTEM
+-- ==========================================
+local dragging, dragInput, dragStart, startPos
+
+local function update(input)
+    local delta = input.Position - dragStart
+    MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        update(input)
+    end
+end)
+
+-- ==========================================
+-- BUTTON FUNCTIONS
+-- ==========================================
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    if minimized then
+        ContentFrame.Visible = false
+        MainFrame.Size = UDim2.new(0, 250, 0, 30)
+    else
+        ContentFrame.Visible = true
+        MainFrame.Size = UDim2.new(0, 250, 0, 120)
+    end
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    if isRunning then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(80, 200, 80)
+        ToggleBtn.Text = "Status: ON"
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+        ToggleBtn.Text = "Status: OFF"
+    end
+end)
+
+-- ==========================================
+-- MAIN LOGIC (BACKGROUND PROCESS)
+-- ==========================================
+task.spawn(function()
+    while task.wait(0.5) do
+        if isRunning then
+            -- Melacak Path secara aman menggunakan FindFirstChild agar terhindar dari error
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if playerGui then
+                local gameGui = playerGui:FindFirstChild("GameGui")
+                if gameGui then
+                    local screen = gameGui:FindFirstChild("Screen")
+                    if screen then
+                        local middle = screen:FindFirstChild("Middle")
+                        if middle then
+                            local gameEnd = middle:FindFirstChild("GameEnd")
+                            
+                            -- Jika UI GameEnd ditemukan dan sedang Visible (muncul di layar)
+                            if gameEnd and gameEnd.Visible == true then
+                                
+                                -- Mencari path tombol "Again" dengan aman
+                                local items = gameEnd:FindFirstChild("Items")
+                                local frame = items and items:FindFirstChild("Frame")
+                                local actions = frame and frame:FindFirstChild("Actions")
+                                local actionsItems = actions and actions:FindFirstChild("Items")
+                                local againBtn = actionsItems and actionsItems:FindFirstChild("Again")
+                                
+                                if againBtn then
+                                    -- Menjalankan referensi klik getconnections milikmu
+                                    local Connections = {"Activated", "MouseButton1Click", "MouseButton1Down"}
+                                    for _, connectionType in next, Connections do
+                                        pcall(function() -- Dibungkus pcall agar script tidak putus jika ada error executor
+                                            if againBtn[connectionType] then
+                                                for _, conn in next, getconnections(againBtn[connectionType]) do
+                                                    conn:Fire()
+                                                end
+                                            end
+                                        end)
+                                    end
+                                    
+                                    -- Jeda 3 detik setelah mencoba klik. 
+                                    -- Jika centang belum masuk (atau UI gagal tertutup/restart), 
+                                    -- loop akan kembali ke atas dan mengulangi klik pada tombol tersebut.
+                                    task.wait(3)
+                                end
+                                
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
