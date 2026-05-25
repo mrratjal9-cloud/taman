@@ -27,7 +27,7 @@ local CONFIG = {
 
     -- ============= TIMING =============
     BOOT_DELAY   = 1.0,    -- delay sebelum loop pertama
-    LOOP_DELAY   = 0.10,   -- delay antar place (main)
+    LOOP_DELAY   = 0.07,   -- delay antar place (main)
     LOOP_JITTER  = 0.04,   -- random +/- ke loop delay
 
     -- ============= PRIORITY (slot AWAL, wajib duluan) =============
