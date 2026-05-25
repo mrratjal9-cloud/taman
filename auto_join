@@ -1,0 +1,190 @@
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local AUTO_START = true        
+local TARGET_MAP = "map_farm" -- Ganti sesuai id map (contoh: , map_graveyard)
+local TARGET_DIF = "dif_easy" -- dif_easy, dif_normal, dif_hard, dif_insane, dif_impossible, dif_apocalypse
+local MAX_PLAYERS = 1          
+local LOBBY_PLACE_ID = 108533757090220 
+
+-- Daftar pintu (Sesuaikan RemoteIndex dengan nomor pintunya)
+local DOORS = {
+    {CF = CFrame.new(84.8885498, 66.4031448, 789.898621), RemoteIndex = "5"},
+    {CF = CFrame.new(96.9751129, 66.0011368, 789.898621), RemoteIndex = "6"},
+    {CF = CFrame.new(109.094376, 66.3031387, 789.898621), RemoteIndex = "7"},
+    {CF = CFrame.new(121.804642, 66.9051361, 789.898621), RemoteIndex = "8"}
+}
+
+-- ==========================================
+-- VARIABLES & GUI SETUP
+-- ==========================================
+local isRunning = AUTO_START
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+local activeRemoteSuffix = "8" 
+
+if CoreGui:FindFirstChild("AutoJoinerGUI") then CoreGui.AutoJoinerGUI:Destroy() end
+local ScreenGui = Instance.new("ScreenGui"); ScreenGui.Name = "AutoJoinerGUI"; ScreenGui.Parent = CoreGui
+local MainFrame = Instance.new("Frame"); MainFrame.Size = UDim2.new(0, 250, 0, 120); MainFrame.Position = UDim2.new(0.5, -125, 0.5, -60); MainFrame.BackgroundColor3 = Color3.fromRGB(35, 30, 40); MainFrame.Parent = ScreenGui
+local UICorner = Instance.new("UICorner"); UICorner.Parent = MainFrame
+local TopBar = Instance.new("Frame"); TopBar.Size = UDim2.new(1, 0, 0, 30); TopBar.BackgroundColor3 = Color3.fromRGB(25, 20, 30); TopBar.Parent = MainFrame
+local Title = Instance.new("TextLabel"); Title.Size = UDim2.new(1, -60, 1, 0); Title.Position = UDim2.new(0, 10, 0, 0); Title.BackgroundTransparency = 1; Title.Text = "Auto Joiner V6.4 (Map Fix)"; Title.TextColor3 = Color3.fromRGB(255, 255, 255); Title.Font = Enum.Font.GothamBold; Title.TextSize = 12; Title.Parent = TopBar
+local ToggleBtn = Instance.new("TextButton"); ToggleBtn.Size = UDim2.new(0.8, 0, 0, 40); ToggleBtn.Position = UDim2.new(0.1, 0, 0.5, -20); ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80); ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"; ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255); ToggleBtn.Font = Enum.Font.GothamBold; ToggleBtn.Parent = MainFrame
+Instance.new("UICorner", ToggleBtn)
+
+-- DRAG SYSTEM
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; dragStart = input.Position; startPos = MainFrame.Position
+        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+end)
+
+-- ==========================================
+-- FUNGSI VIRTUAL CLICK
+-- ==========================================
+local function virtualClick(button)
+    if button and getconnections then
+        for _, conn in pairs(getconnections(button.MouseButton1Click)) do conn:Fire() end
+        for _, conn in pairs(getconnections(button.Activated)) do conn:Fire() end
+        for _, conn in pairs(getconnections(button.MouseButton1Down)) do conn:Fire() end
+    end
+end
+
+-- ==========================================
+-- MAIN LOGIC (STATE MACHINE)
+-- ==========================================
+task.spawn(function()
+    while task.wait(0.3) do
+        if isRunning and game.PlaceId == LOBBY_PLACE_ID then
+            local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if not pGui then continue end
+            
+            local gameGui = pGui:FindFirstChild("GameGui")
+            local screen = gameGui and gameGui:FindFirstChild("Screen")
+            
+            -- Melacak Path 1 (Bottom.Lobby) dan Tombol Start
+            local bottom = screen and screen:FindFirstChild("Bottom")
+            local bottomLobby = bottom and bottom:FindFirstChild("Lobby")
+            local lobbyFrame = bottomLobby and bottomLobby:FindFirstChild("Frame")
+            local lobbyButtons = lobbyFrame and lobbyFrame:FindFirstChild("Buttons")
+            local startNowBtn = lobbyButtons and lobbyButtons:FindFirstChild("StartNow")
+            
+            -- Melacak Path Menu (Middle.MapPickerLobby)
+            local middle = screen and screen:FindFirstChild("Middle")
+            local mapPickerLobby = middle and middle:FindFirstChild("MapPickerLobby")
+            local items = mapPickerLobby and mapPickerLobby:FindFirstChild("Items")
+            local frame = items and items:FindFirstChild("Frame")
+            
+            -- Tombol Create Lobby (Accept)
+            local frameInfo = frame and frame:FindFirstChild("Info")
+            local acceptBtn = frameInfo and frameInfo:FindFirstChild("Accept")
+            
+            -- Tombol Pilihan Map (Dari Debugger Baru)
+            local mapsFolder = frame and frame:FindFirstChild("Maps")
+            local scrollFrame = mapsFolder and mapsFolder:FindFirstChild("ScrollingFrame")
+            local contentFolder = scrollFrame and scrollFrame:FindFirstChild("Content")
+            local targetMapBtn = contentFolder and contentFolder:FindFirstChild(TARGET_MAP)
+
+            local remotes = ReplicatedStorage:WaitForChild("RemoteFunctions")
+
+            -- ==========================================
+            -- STATUS 1: SUDAH DI DALAM LOBBY (Bottom.Lobby Terlihat)
+            -- ==========================================
+            if bottomLobby and bottomLobby.Visible == true then
+                print("Status: In Room. Menyiapkan Start...")
+                
+                -- Set Max Player
+                pcall(function()
+                    remotes:WaitForChild("LobbySetMaxPlayers_" .. activeRemoteSuffix):InvokeServer(MAX_PLAYERS)
+                end)
+                task.wait(0.5)
+                
+                -- Klik Tombol StartNow
+                if startNowBtn then
+                    print("Status: Mengeklik tombol StartNow...")
+                    virtualClick(startNowBtn)
+                    print("Berhasil Start! Menunggu teleportasi game...")
+                    task.wait(6) 
+                end
+
+            -- ==========================================
+            -- STATUS 2: DI MENU PEMILIHAN MAP (MapPickerLobby Terlihat)
+            -- ==========================================
+            elseif mapPickerLobby and mapPickerLobby.Visible == true then
+                if acceptBtn then
+                    print("Status: Picking Map. Memilih Map...")
+                    task.wait(0.5) -- JEDA NAFAS
+                    
+                    -- Langkah 1: KLIK TOMBOL MAP DULU
+                    if targetMapBtn then
+                        print("Mengeklik icon map: " .. TARGET_MAP)
+                        virtualClick(targetMapBtn)
+                        task.wait(0.3) -- Beri waktu sedikit agar UI pindah seleksi map
+                    else
+                        print("WARNING: Map '" .. TARGET_MAP .. "' tidak ditemukan di UI!")
+                    end
+                    
+                    -- Langkah 2: KLIK CREATE LOBBY
+                    print("Mengeklik Create Lobby...")
+                    virtualClick(acceptBtn)
+                    
+                    -- Langkah 3: TEMBAK REMOTE SEBAGAI PENGAMAN (Backup)
+                    pcall(function()
+                        remotes:WaitForChild("LobbySetMap_" .. activeRemoteSuffix):InvokeServer(TARGET_MAP, TARGET_DIF, false)
+                    end)
+                    
+                    print("Setup Map Selesai!")
+                    task.wait(1.5) 
+                end
+
+            -- ==========================================
+            -- STATUS 3: MENCARI PINTU (Teleportasi)
+            -- ==========================================
+            else
+                for _, door in ipairs(DOORS) do
+                    if not isRunning then break end
+                    local char = LocalPlayer.Character
+                    if char and char:FindFirstChild("HumanoidRootPart") then
+                        -- Teleport
+                        char.HumanoidRootPart.CFrame = door.CF
+                        task.wait(1.2) -- Tunggu reaksi UI
+
+                        if mapPickerLobby and mapPickerLobby.Visible == true then
+                            activeRemoteSuffix = door.RemoteIndex
+                            print("Berhasil masuk Pintu " .. activeRemoteSuffix)
+                            break 
+                        else
+                            -- FIX Pintu Penuh/Bug
+                            print("Pintu " .. door.RemoteIndex .. " penuh. Memaksa LeaveLobby...")
+                            pcall(function()
+                                remotes:WaitForChild("LeaveLobby_" .. door.RemoteIndex):InvokeServer()
+                            end)
+                            task.wait(0.5)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
