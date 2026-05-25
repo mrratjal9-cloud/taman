@@ -1,0 +1,748 @@
+-- ==========================================
+-- AUTO PLACE UNIT V4 (Priority + Backup Edition)
+-- ==========================================
+-- Upgrade dari V3:
+--   1) CONFIG dengan komentar grouping lengkap (mirip V2 style).
+--   2) SLOTS_PRIORITY -> slot "AWAL" yang KRUSIAL, WAJIB di-place
+--      duluan sebelum slot main lainnya. Loop akan retry priority
+--      sampai semua sukses, baru lanjut ke main.
+--   3) SLOTS_BACKUP -> koordinat cadangan. Hanya aktif kalau:
+--        a) wave saat ini >= CONFIG.BACKUP_AFTER_WAVE  DAN
+--        b) masih ada slot MAIN yang belum sukses di-place
+--      Kalau semua slot main sudah sukses, backup di-ignore.
+--
+--   Semua fitur V3 dipertahankan:
+--     - Compatibility (math.random, no string method-chain)
+--     - Shuffle-bag, micro-offset, random rotation
+--     - Retry on fail, timing jitter, stats real-time
+--     - Wave detector, boot diagnostics
+-- ==========================================
+
+print("[AutoPlaceV4] Boot: starting...")
+
+-- ==========================================
+-- COMPATIBILITY SHIMS
+-- ==========================================
+local _unpack = table.unpack or unpack
+math.randomseed(tick() * 1000 % 2147483647)
+for i = 1, 8 do math.random() end -- warm up RNG
+
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local CONFIG = {
+    -- Core
+    AUTO_START         = true,         -- false = idle saat dimuat
+    TARGET_UNIT        = "unit_tomato_plant",
+
+    -- Loop & timing
+    LOOP_DELAY         = 0.10,         -- detik (base)
+    LOOP_DELAY_JITTER  = 0.04,         -- detik random tambahan; 0.04 = +/-40ms
+
+    -- Wave control
+    WAVE_CONTROL       = true,         -- nyalakan/matikan auto on-off berdasar wave
+    START_WAVE         = 1,            -- wave mulai script otomatis ON
+    STOP_WAVE          = 11,           -- wave script otomatis OFF
+
+    -- Randomizer
+    POSITION_OFFSET    = 0.05,         -- stud, +/- di X dan Z (Y dipertahankan)
+    ROTATION_MODE      = "step90",     -- "step90" | "smooth" | "fixed" | "off"
+    FIXED_ROTATION_DEG = 0,            -- dipakai kalau ROTATION_MODE="fixed"
+
+    -- Failure handling
+    MAX_RETRY_PER_LOOP = 3,            -- retry per iterasi kalau placement gagal
+
+    -- Priority slots (NEW V4)
+    -- Slot AWAL yang krusial. Loop akan place priority dulu sampai
+    -- semuanya sukses, baru lanjut ke slot main.
+    PRIORITY_LOCK      = true,         -- true = main TIDAK akan jalan sebelum semua priority sukses
+    PRIORITY_MAX_TRIES = 999,          -- batas total percobaan priority (anti infinite loop)
+
+    -- Backup slots (NEW V4)
+    -- Aktif hanya saat: wave >= BACKUP_AFTER_WAVE AND ada main slot yang belum sukses
+    USE_BACKUP_ON_FAIL = true,         -- master switch fitur backup
+    BACKUP_AFTER_WAVE  = 5,            -- mulai pakai backup setelah wave ini
+    BACKUP_PICK_CHANCE = 0.5,          -- probabilitas pilih backup vs main saat aktif (0.0-1.0)
+
+    -- Logging
+    VERBOSE            = false,        -- true = print setiap placement ke console
+}
+
+-- ==========================================
+-- PLACEMENT SLOTS
+-- ==========================================
+-- Format: { x, y, z }  (rotation auto identity, di-randomize runtime)
+
+-- ===== PRIORITY: SLOT AWAL (WAJIB DULUAN, KRUSIAL!) =====
+local SLOTS_PRIORITY = {
+    -- AWAL
+    { -332.48974609375, 61.68030548095703, -105.15811920166016 },
+    { -338.4619140625,  61.68030548095703, -105.03054809570312 },
+}
+
+-- ===== MAIN: SLOT NORMAL (di-cycle pakai shuffle-bag) =====
+local SLOTS_MAIN = {
+    -- LAYER 1 (X = -332.27)
+    { -332.26861572265625, 61.68030548095703, -134.24404907226562 },
+    { -332.26861572265625, 61.68030548095703, -131.9630126953125  },
+    { -332.26861572265625, 61.68030548095703, -129.72555541992188 },
+    { -332.26861572265625, 61.68030548095703, -127.57781982421875 },
+    { -332.26861572265625, 61.68030548095703, -125.37130737304688 },
+    { -332.26861572265625, 61.68030548095703, -123.1337890625     },
+
+    -- LAYER 2 (X = -330.12)
+    { -330.1163024902344, 61.68030548095703, -134.24404907226562 },
+    { -330.1163024902344, 61.68030548095703, -131.9630126953125  },
+    { -330.1163024902344, 61.68030548095703, -129.72555541992188 },
+    { -330.1163024902344, 61.68030548095703, -127.57781982421875 },
+    { -330.1163024902344, 61.68030548095703, -125.37130737304688 },
+    { -330.1163024902344, 61.68030548095703, -123.1337890625     },
+
+    -- LAYER 3 (X = -327.89)
+    { -327.88763427734375, 61.68030548095703, -134.24404907226562 },
+    { -327.88763427734375, 61.68030548095703, -131.9630126953125  },
+    { -327.88763427734375, 61.68030548095703, -129.72555541992188 },
+    { -327.88763427734375, 61.68030548095703, -127.57781982421875 },
+    { -327.88763427734375, 61.68030548095703, -125.37130737304688 },
+    { -327.88763427734375, 61.68030548095703, -123.1337890625     },
+}
+
+-- ===== BACKUP: KOORDINAT CADANGAN =====
+-- Isi koordinat cadangan di sini. Kosongkan kalau tidak dipakai.
+-- Aktif hanya saat: wave >= CONFIG.BACKUP_AFTER_WAVE
+--                   AND ada slot MAIN yang belum sukses di-place.
+local SLOTS_BACKUP = {
+    -- Contoh (silakan ganti / tambah / hapus):
+    -- { -325.5, 61.68030548095703, -118.0 },
+    -- { -340.0, 61.68030548095703, -110.0 },
+}
+
+print(string.format(
+    "[AutoPlaceV4] Slots loaded: priority=%d main=%d backup=%d",
+    #SLOTS_PRIORITY, #SLOTS_MAIN, #SLOTS_BACKUP
+))
+
+-- ==========================================
+-- SERVICES
+-- ==========================================
+local CoreGui            = game:GetService("CoreGui")
+local UserInputService   = game:GetService("UserInputService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local LocalPlayer        = Players.LocalPlayer
+
+print("[AutoPlaceV4] Services obtained")
+
+-- ==========================================
+-- STATE
+-- ==========================================
+local isRunning   = CONFIG.AUTO_START
+
+-- Per-slot satisfaction tracking (true = sudah sukses minimal 1x)
+local prioritySatisfied = {}   -- [i] = bool
+local mainSatisfied     = {}   -- [i] = bool
+for i = 1, #SLOTS_PRIORITY do prioritySatisfied[i] = false end
+for i = 1, #SLOTS_MAIN     do mainSatisfied[i]     = false end
+
+-- Counter percobaan priority untuk anti-infinite-loop
+local priorityAttempts = {}
+for i = 1, #SLOTS_PRIORITY do priorityAttempts[i] = 0 end
+
+-- Shuffle bag untuk main & backup
+local mainBag    = {}
+local backupBag  = {}
+
+-- Stats
+local stats = {
+    placed_p   = 0, ok_p   = 0, fail_p   = 0,
+    placed_m   = 0, ok_m   = 0, fail_m   = 0,
+    placed_b   = 0, ok_b   = 0, fail_b   = 0,
+}
+local lastResult  = "-"
+local lastWaveNum = -1
+local currentPhase = "init"  -- "priority" | "main" | "backup" | "done"
+
+-- ==========================================
+-- HELPERS
+-- ==========================================
+local function randFloat(a, b) return a + (b - a) * math.random() end
+local function randInt(a, b)   return math.random(a, b) end
+
+local function strLower(s)
+    if type(s) ~= "string" then return "" end
+    return string.lower(s)
+end
+local function strContains(s, needle)
+    if type(s) ~= "string" or type(needle) ~= "string" then return false end
+    return string.find(s, needle, 1, true) ~= nil
+end
+
+local function countTrue(t, total)
+    local n = 0
+    for i = 1, total do if t[i] then n = n + 1 end end
+    return n
+end
+
+local function countPriorityDone()
+    return countTrue(prioritySatisfied, #SLOTS_PRIORITY)
+end
+local function countMainDone()
+    return countTrue(mainSatisfied, #SLOTS_MAIN)
+end
+local function countMainPending()
+    return #SLOTS_MAIN - countMainDone()
+end
+
+local function isAllPriorityDone()
+    return countPriorityDone() >= #SLOTS_PRIORITY
+end
+
+-- ==========================================
+-- GUI
+-- ==========================================
+if CoreGui:FindFirstChild("AutoPlaceGUI") then CoreGui.AutoPlaceGUI:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoPlaceGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 300, 0, 240)
+MainFrame.Position = UDim2.new(0.5, -150, 0.5, -120)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Place V4 (Priority+Backup)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.9, 0, 0, 36)
+ToggleBtn.Position = UDim2.new(0.05, 0, 0, 6)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 16
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = ContentFrame
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local RotBtn = Instance.new("TextButton")
+RotBtn.Size = UDim2.new(0.9, 0, 0, 26)
+RotBtn.Position = UDim2.new(0.05, 0, 0, 48)
+RotBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+RotBtn.Text = "Rotation: " .. CONFIG.ROTATION_MODE
+RotBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+RotBtn.Font = Enum.Font.Gotham
+RotBtn.TextSize = 12
+RotBtn.AutoButtonColor = true
+RotBtn.Parent = ContentFrame
+Instance.new("UICorner", RotBtn).CornerRadius = UDim.new(0, 6)
+
+local PhaseLbl = Instance.new("TextLabel")
+PhaseLbl.Size = UDim2.new(1, -20, 0, 14)
+PhaseLbl.Position = UDim2.new(0, 10, 0, 80)
+PhaseLbl.BackgroundTransparency = 1
+PhaseLbl.Text = "Phase: -"
+PhaseLbl.TextColor3 = Color3.fromRGB(255, 220, 130)
+PhaseLbl.Font = Enum.Font.GothamBold
+PhaseLbl.TextSize = 12
+PhaseLbl.TextXAlignment = Enum.TextXAlignment.Left
+PhaseLbl.Parent = ContentFrame
+
+local ProgLbl = Instance.new("TextLabel")
+ProgLbl.Size = UDim2.new(1, -20, 0, 14)
+ProgLbl.Position = UDim2.new(0, 10, 0, 96)
+ProgLbl.BackgroundTransparency = 1
+ProgLbl.Text = "Priority: 0/0  |  Main: 0/0"
+ProgLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+ProgLbl.Font = Enum.Font.Gotham
+ProgLbl.TextSize = 11
+ProgLbl.TextXAlignment = Enum.TextXAlignment.Left
+ProgLbl.Parent = ContentFrame
+
+local StatsLbl = Instance.new("TextLabel")
+StatsLbl.Size = UDim2.new(1, -20, 0, 14)
+StatsLbl.Position = UDim2.new(0, 10, 0, 112)
+StatsLbl.BackgroundTransparency = 1
+StatsLbl.Text = "OK P:0 M:0 B:0  |  Fail P:0 M:0 B:0"
+StatsLbl.TextColor3 = Color3.fromRGB(180, 200, 220)
+StatsLbl.Font = Enum.Font.Gotham
+StatsLbl.TextSize = 11
+StatsLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatsLbl.Parent = ContentFrame
+
+local WaveLbl = Instance.new("TextLabel")
+WaveLbl.Size = UDim2.new(1, -20, 0, 14)
+WaveLbl.Position = UDim2.new(0, 10, 0, 128)
+WaveLbl.BackgroundTransparency = 1
+WaveLbl.Text = "Wave: -  |  Backup: idle"
+WaveLbl.TextColor3 = Color3.fromRGB(220, 200, 180)
+WaveLbl.Font = Enum.Font.Gotham
+WaveLbl.TextSize = 11
+WaveLbl.TextXAlignment = Enum.TextXAlignment.Left
+WaveLbl.Parent = ContentFrame
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.new(1, -20, 0, 50)
+StatusLbl.Position = UDim2.new(0, 10, 0, 146)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text = "Last: -"
+StatusLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.TextWrapped = true
+StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+StatusLbl.Parent = ContentFrame
+
+local function isBackupActive()
+    if not CONFIG.USE_BACKUP_ON_FAIL then return false end
+    if #SLOTS_BACKUP == 0 then return false end
+    if lastWaveNum < CONFIG.BACKUP_AFTER_WAVE then return false end
+    if countMainPending() <= 0 then return false end
+    return true
+end
+
+local function refreshStats()
+    PhaseLbl.Text = "Phase: " .. currentPhase
+    ProgLbl.Text  = string.format("Priority: %d/%d  |  Main: %d/%d",
+        countPriorityDone(), #SLOTS_PRIORITY,
+        countMainDone(),     #SLOTS_MAIN)
+    StatsLbl.Text = string.format("OK P:%d M:%d B:%d  |  Fail P:%d M:%d B:%d",
+        stats.ok_p, stats.ok_m, stats.ok_b,
+        stats.fail_p, stats.fail_m, stats.fail_b)
+    local backupTxt = isBackupActive() and "ACTIVE" or "idle"
+    WaveLbl.Text  = string.format("Wave: %s  |  Backup: %s",
+        (lastWaveNum >= 0 and tostring(lastWaveNum) or "-"),
+        backupTxt)
+    StatusLbl.Text = "Last: " .. tostring(lastResult)
+end
+
+print("[AutoPlaceV4] GUI built")
+
+-- ==========================================
+-- DRAG SYSTEM
+-- ==========================================
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging  = true
+        dragStart = input.Position
+        startPos  = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ==========================================
+-- BUTTON HANDLERS
+-- ==========================================
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentFrame.Visible = not minimized
+    MainFrame.Size = minimized and UDim2.new(0, 300, 0, 30) or UDim2.new(0, 300, 0, 240)
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+
+local function setScriptState(state)
+    isRunning = state
+    if isRunning then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(80, 200, 80)
+        ToggleBtn.Text = "Status: ON"
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+        ToggleBtn.Text = "Status: OFF"
+    end
+end
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    setScriptState(not isRunning)
+end)
+
+local ROT_MODES = { "step90", "smooth", "fixed", "off" }
+local function nextRotMode(cur)
+    for i = 1, #ROT_MODES do
+        if ROT_MODES[i] == cur then
+            return ROT_MODES[(i % #ROT_MODES) + 1]
+        end
+    end
+    return ROT_MODES[1]
+end
+RotBtn.MouseButton1Click:Connect(function()
+    CONFIG.ROTATION_MODE = nextRotMode(CONFIG.ROTATION_MODE)
+    RotBtn.Text = "Rotation: " .. CONFIG.ROTATION_MODE
+end)
+
+-- ==========================================
+-- SHUFFLE-BAG (Fisher-Yates)
+-- ==========================================
+local function buildBag(n)
+    local bag = {}
+    for i = 1, n do bag[i] = i end
+    for i = n, 2, -1 do
+        local j = randInt(1, i)
+        bag[i], bag[j] = bag[j], bag[i]
+    end
+    return bag
+end
+
+local function refillMainBag()
+    mainBag = buildBag(#SLOTS_MAIN)
+end
+local function refillBackupBag()
+    backupBag = buildBag(#SLOTS_BACKUP)
+end
+
+-- ==========================================
+-- ROTATION GENERATOR
+-- ==========================================
+local function pickRotationDeg()
+    local m = CONFIG.ROTATION_MODE
+    if m == "off" then
+        return 0
+    elseif m == "fixed" then
+        return CONFIG.FIXED_ROTATION_DEG or 0
+    elseif m == "smooth" then
+        return randFloat(0, 360)
+    else
+        local steps = { 0, 90, 180, 270 }
+        return steps[randInt(1, 4)]
+    end
+end
+
+-- ==========================================
+-- BUILD PLACEMENT ARGS
+-- ==========================================
+local function buildArgs(slotXYZ)
+    local off = CONFIG.POSITION_OFFSET or 0
+    local dx, dz = 0, 0
+    if off > 0 then
+        dx = randFloat(-off, off)
+        dz = randFloat(-off, off)
+    end
+
+    local x = slotXYZ[1] + dx
+    local y = slotXYZ[2]
+    local z = slotXYZ[3] + dz
+
+    local rotDeg = pickRotationDeg()
+    local cf = CFrame.new(x, y, z) * CFrame.Angles(0, math.rad(rotDeg), 0)
+    local pos = Vector3.new(x, y, z)
+
+    local args = {
+        CONFIG.TARGET_UNIT,
+        {
+            CF       = cf,
+            Rotation = rotDeg,
+            Valid    = true,
+            Position = pos,
+        }
+    }
+    return args, rotDeg
+end
+
+-- ==========================================
+-- PLACEMENT REMOTE
+-- ==========================================
+local placeUnitRemote
+local function getPlaceUnitRemote()
+    if placeUnitRemote and placeUnitRemote.Parent then return placeUnitRemote end
+    local rf = ReplicatedStorage:FindFirstChild("RemoteFunctions")
+    if rf then placeUnitRemote = rf:FindFirstChild("PlaceUnit") end
+    return placeUnitRemote
+end
+
+local function isSuccessReturn(ok, ret)
+    if not ok then return false end
+    if ret == false then return false end
+    if type(ret) == "string" and strContains(strLower(ret), "fail") then
+        return false
+    end
+    if type(ret) == "table" and ret.success == false then
+        return false
+    end
+    return true
+end
+
+-- ==========================================
+-- SLOT SELECTOR (PHASE LOGIC)
+-- ==========================================
+-- Return: phaseTag ("P"/"M"/"B"), slotIdx, slotXYZ
+local function selectSlot()
+    -- ===== PHASE 1: PRIORITY (selalu duluan kalau belum semua sukses) =====
+    if CONFIG.PRIORITY_LOCK then
+        for i = 1, #SLOTS_PRIORITY do
+            if not prioritySatisfied[i] then
+                if priorityAttempts[i] < CONFIG.PRIORITY_MAX_TRIES then
+                    return "P", i, SLOTS_PRIORITY[i]
+                end
+            end
+        end
+    end
+
+    -- ===== PHASE 3: BACKUP (probabilistik, hanya saat aktif) =====
+    if isBackupActive() and math.random() < CONFIG.BACKUP_PICK_CHANCE then
+        if #backupBag == 0 then refillBackupBag() end
+        local idx = table.remove(backupBag, 1)
+        return "B", idx, SLOTS_BACKUP[idx]
+    end
+
+    -- ===== PHASE 2: MAIN (shuffle bag, prefer slot yang belum sukses) =====
+    -- Kalau masih ada main pending, pilih dari pending dulu
+    local pending = countMainPending()
+    if pending > 0 then
+        -- Build pending list
+        local pendingList = {}
+        for i = 1, #SLOTS_MAIN do
+            if not mainSatisfied[i] then
+                pendingList[#pendingList + 1] = i
+            end
+        end
+        local idx = pendingList[randInt(1, #pendingList)]
+        return "M", idx, SLOTS_MAIN[idx]
+    end
+
+    -- ===== PHASE 4: ALL DONE -> continuous main shuffle bag =====
+    if #mainBag == 0 then refillMainBag() end
+    local idx = table.remove(mainBag, 1)
+    return "M", idx, SLOTS_MAIN[idx]
+end
+
+local function updatePhaseLabel(phaseTag)
+    if phaseTag == "P" then
+        currentPhase = "priority (AWAL)"
+    elseif phaseTag == "B" then
+        currentPhase = "backup"
+    elseif phaseTag == "M" then
+        if isAllPriorityDone() and countMainPending() == 0 then
+            currentPhase = "main (cycle - all done)"
+        else
+            currentPhase = "main"
+        end
+    end
+end
+
+-- ==========================================
+-- TRY PLACE + RETRY
+-- ==========================================
+local function tryPlaceOnce()
+    local remote = getPlaceUnitRemote()
+    if not remote then
+        return false, nil, nil, "PlaceUnit remote belum ready"
+    end
+    local phaseTag, slotIdx, slotXYZ = selectSlot()
+    updatePhaseLabel(phaseTag)
+
+    -- Track priority attempts
+    if phaseTag == "P" then
+        priorityAttempts[slotIdx] = priorityAttempts[slotIdx] + 1
+    end
+
+    local args, rotDeg = buildArgs(slotXYZ)
+    local ok, ret = pcall(function()
+        return remote:InvokeServer(_unpack(args))
+    end)
+    local success = isSuccessReturn(ok, ret)
+    local detail = string.format("[%s%d] rot=%s ret=%s",
+        phaseTag, slotIdx, tostring(rotDeg), tostring(ret))
+    return success, phaseTag, slotIdx, detail
+end
+
+local function bumpStats(phaseTag, success)
+    if phaseTag == "P" then
+        stats.placed_p = stats.placed_p + 1
+        if success then stats.ok_p = stats.ok_p + 1 else stats.fail_p = stats.fail_p + 1 end
+    elseif phaseTag == "M" then
+        stats.placed_m = stats.placed_m + 1
+        if success then stats.ok_m = stats.ok_m + 1 else stats.fail_m = stats.fail_m + 1 end
+    elseif phaseTag == "B" then
+        stats.placed_b = stats.placed_b + 1
+        if success then stats.ok_b = stats.ok_b + 1 else stats.fail_b = stats.fail_b + 1 end
+    end
+end
+
+local function markSatisfied(phaseTag, slotIdx)
+    if phaseTag == "P" then
+        prioritySatisfied[slotIdx] = true
+    elseif phaseTag == "M" then
+        mainSatisfied[slotIdx] = true
+    end
+    -- Backup tidak track satisfaction (cuma compensate failures)
+end
+
+local function placeWithRetry()
+    local lastDetail   = "-"
+    local lastPhaseTag = "?"
+    local lastSlotIdx  = 0
+
+    for attempt = 1, CONFIG.MAX_RETRY_PER_LOOP do
+        local ok, phaseTag, slotIdx, detail = tryPlaceOnce()
+        lastDetail   = detail or "-"
+        lastPhaseTag = phaseTag or "?"
+        lastSlotIdx  = slotIdx or 0
+        if ok then
+            markSatisfied(phaseTag, slotIdx)
+            bumpStats(phaseTag, true)
+            lastResult = string.format("OK try=%d %s", attempt, detail)
+            if CONFIG.VERBOSE then print("[AutoPlaceV4] " .. lastResult) end
+            return true
+        end
+        task.wait(0.05)
+    end
+
+    bumpStats(lastPhaseTag, false)
+    lastResult = string.format("FAIL after %d tries: %s",
+        CONFIG.MAX_RETRY_PER_LOOP, lastDetail)
+    if CONFIG.VERBOSE then warn("[AutoPlaceV4] " .. lastResult) end
+    return false
+end
+
+-- ==========================================
+-- WAVE DETECTOR
+-- ==========================================
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if CONFIG.WAVE_CONTROL then
+            pcall(function()
+                local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+                if pGui then
+                    local ggn     = pGui:FindFirstChild("GameGuiNoInset")
+                    local screen  = ggn and ggn:FindFirstChild("Screen")
+                    local top     = screen and screen:FindFirstChild("Top")
+                    local info    = top and top:FindFirstChild("GameInfo")
+                    local content = info and info:FindFirstChild("Content")
+                    local waves   = content and content:FindFirstChild("Waves")
+                    local title   = waves and waves:FindFirstChild("Title")
+
+                    if title and title.Text and title.Text ~= "" then
+                        local match = string.match(title.Text, "[Ww][Aa][Vv][Ee]%s*(%d+)")
+                        if match then
+                            local cur = tonumber(match)
+                            if cur ~= lastWaveNum then
+                                lastWaveNum = cur
+                                if cur == CONFIG.START_WAVE and not isRunning then
+                                    print("[AutoPlaceV4] Reach START_WAVE -> ON")
+                                    setScriptState(true)
+                                elseif cur == CONFIG.STOP_WAVE and isRunning then
+                                    print("[AutoPlaceV4] Reach STOP_WAVE -> OFF")
+                                    setScriptState(false)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- ==========================================
+-- MAIN LOOP
+-- ==========================================
+refillMainBag()
+if #SLOTS_BACKUP > 0 then refillBackupBag() end
+refreshStats()
+
+task.spawn(function()
+    while true do
+        local base = CONFIG.LOOP_DELAY
+        local jit  = CONFIG.LOOP_DELAY_JITTER or 0
+        local extra = 0
+        if jit > 0 then extra = randFloat(-jit, jit) end
+        local delay = base + extra
+        if delay < 0.01 then delay = 0.01 end
+        task.wait(delay)
+
+        if isRunning then
+            local ok, err = pcall(placeWithRetry)
+            if not ok then
+                warn("[AutoPlaceV4] Iterasi error: " .. tostring(err))
+                lastResult = "ERROR: " .. tostring(err)
+            end
+            refreshStats()
+        end
+    end
+end)
+
+print(string.format(
+    "[AutoPlaceV4] Loaded OK. Unit=%s | Priority=%d Main=%d Backup=%d | Rot=%s",
+    CONFIG.TARGET_UNIT, #SLOTS_PRIORITY, #SLOTS_MAIN, #SLOTS_BACKUP, CONFIG.ROTATION_MODE
+))
