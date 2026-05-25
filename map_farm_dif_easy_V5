@@ -55,7 +55,7 @@ local CONFIG = {
     -- Priority slots (NEW V4, strengthened V5)
     PRIORITY_LOCK      = true,
     PRIORITY_DELAY     = 0.40,         -- detik antar penempatan PRIORITY (lebih lambat agar visible)
-    PRIORITY_MAX_TRIES = 9999,         -- per-slot cap (anti infinite loop)
+    PRIORITY_MAX_TRIES = 99999,         -- per-slot cap (anti infinite loop)
 
     -- Wave control
     WAVE_CONTROL       = true,
