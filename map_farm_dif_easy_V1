@@ -1,0 +1,252 @@
+task.wait (2)
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+print("testtis")
+local AUTO_START = true        -- Kondisi awal saat dieksekusi
+local LOOP_DELAY = 0.1         -- Jeda waktu (detik) antar penempatan
+local WAVE_CONTROL = true      -- Nyalakan/Matikan fitur deteksi Wave otomatis
+local START_WAVE = 1           -- Wave berapa script otomatis NYALA
+local STOP_WAVE = 11           -- Wave berapa script otomatis MATI
+local TARGET_UNIT = "unit_tomato_plant" -- Nama unit yang ingin ditempatkan
+
+-- ==========================================
+-- ANTI-MACRO PLACEMENT DATA (20 Koordinat)
+-- ==========================================
+local PLACEMENTS = {
+    -- AWAL
+    { CF = CFrame.new(-332.48974609375, 61.68030548095703, -105.15811920166016, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.48974609375, 61.68030548095703, -105.15811920166016) },
+    { CF = CFrame.new(-338.4619140625, 61.68030548095703, -105.03054809570312, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-338.4619140625, 61.68030548095703, -105.03054809570312) },
+
+    -- LAYER 1
+    { CF = CFrame.new(-332.26861572265625, 61.68030548095703, -134.24404907226562, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.26861572265625, 61.68030548095703, -134.24404907226562) },
+    { CF = CFrame.new(-332.26861572265625, 61.68030548095703, -131.9630126953125, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.0763854980469, 61.68030548095703, -131.9630126953125) },
+    { CF = CFrame.new(-332.26861572265625, 61.68030548095703, -129.72555541992188, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.27130126953125, 61.68030548095703, -129.72555541992188) },
+    { CF = CFrame.new(-332.26861572265625, 61.68030548095703, -127.57781982421875, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.2373046875, 61.68030548095703, -127.57781982421875) },
+    { CF = CFrame.new(-332.26861572265625, 61.68030548095703, -125.37130737304688, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.1234436035156, 61.68030548095703, -125.37130737304688) },
+    { CF = CFrame.new(-332.26861572265625, 61.68030548095703, -123.1337890625, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.1234436035156, 61.68030548095703, -125.37130737304688) },
+
+    -- LAYER 2
+    { CF = CFrame.new(-330.1163024902344, 61.68030548095703, -134.24404907226562, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.26861572265625, 61.68030548095703, -134.24404907226562) },
+    { CF = CFrame.new(-330.1163024902344, 61.68030548095703, -131.9630126953125, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.0763854980469, 61.68030548095703, -131.9630126953125) },
+    { CF = CFrame.new(-330.1163024902344, 61.68030548095703, -129.72555541992188, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.27130126953125, 61.68030548095703, -129.72555541992188) },
+    { CF = CFrame.new(-330.1163024902344, 61.68030548095703, -127.57781982421875, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.26861572265625, 61.68030548095703, -134.24404907226562) },
+    { CF = CFrame.new(-330.1163024902344, 61.68030548095703, -125.37130737304688, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.1234436035156, 61.68030548095703, -125.37130737304688) },
+    { CF = CFrame.new(-330.1163024902344, 61.68030548095703, -123.1337890625, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.1234436035156, 61.68030548095703, -125.37130737304688) },
+
+    -- LAYER 3
+    { CF = CFrame.new(-327.88763427734375, 61.68030548095703, -134.24404907226562, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.26861572265625, 61.68030548095703, -134.24404907226562) },
+    { CF = CFrame.new(-327.88763427734375, 61.68030548095703, -131.9630126953125, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.0763854980469, 61.68030548095703, -131.9630126953125) },
+    { CF = CFrame.new(-327.88763427734375, 61.68030548095703, -129.72555541992188, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.27130126953125, 61.68030548095703, -129.72555541992188) },
+    { CF = CFrame.new(-327.88763427734375, 61.68030548095703, -127.57781982421875, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.26861572265625, 61.68030548095703, -134.24404907226562) },
+    { CF = CFrame.new(-327.88763427734375, 61.68030548095703, -125.37130737304688, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.1234436035156, 61.68030548095703, -125.37130737304688) },
+    { CF = CFrame.new(-327.88763427734375, 61.68030548095703, -123.1337890625, 1, 0, 0, 0, 1, 0, 0, 0, 1), Position = vector.create(-332.1234436035156, 61.68030548095703, -125.37130737304688) }
+}
+
+-- ==========================================
+-- VARIABLES & GUI SETUP
+-- ==========================================
+local isRunning = AUTO_START
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+if CoreGui:FindFirstChild("AutoPlaceGUI") then CoreGui.AutoPlaceGUI:Destroy() end
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoPlaceGUI"
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 250, 0, 120)
+MainFrame.Position = UDim2.new(0.5, -125, 0.5, -60)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Place Unit (Anti-Macro)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.8, 0, 0, 40)
+ToggleBtn.Position = UDim2.new(0.1, 0, 0.5, -20)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 16
+ToggleBtn.Parent = ContentFrame
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+-- ==========================================
+-- DRAG SYSTEM
+-- ==========================================
+local dragging, dragInput, dragStart, startPos
+local function update(input)
+    local delta = input.Position - dragStart
+    MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; dragStart = input.Position; startPos = MainFrame.Position
+        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then update(input) end
+end)
+
+-- ==========================================
+-- BUTTON & TOGGLE FUNCTIONS
+-- ==========================================
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    if minimized then
+        ContentFrame.Visible = false
+        MainFrame.Size = UDim2.new(0, 250, 0, 30)
+    else
+        ContentFrame.Visible = true
+        MainFrame.Size = UDim2.new(0, 250, 0, 120)
+    end
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+
+local function setScriptState(state)
+    isRunning = state
+    if isRunning then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(80, 200, 80)
+        ToggleBtn.Text = "Status: ON"
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+        ToggleBtn.Text = "Status: OFF"
+    end
+end
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    setScriptState(not isRunning)
+end)
+
+-- ==========================================
+-- AUTO WAVE DETECTOR (BACKGROUND)
+-- ==========================================
+local lastWaveNum = -1
+task.spawn(function()
+    while task.wait(1) do
+        if WAVE_CONTROL then
+            local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if not pGui then continue end
+            
+            local ggn = pGui:FindFirstChild("GameGuiNoInset")
+            local screen = ggn and ggn:FindFirstChild("Screen")
+            local top = screen and screen:FindFirstChild("Top")
+            local info = top and top:FindFirstChild("GameInfo")
+            local content = info and info:FindFirstChild("Content")
+            local waves = content and content:FindFirstChild("Waves")
+            local title = waves and waves:FindFirstChild("Title")
+
+            if title and title.Text ~= "" then
+                local match = string.match(title.Text, "Wave%s*(%d+)") or string.match(title.Text, "WAVE%s*(%d+)")
+                
+                if match then
+                    local currentWaveNum = tonumber(match)
+                    if currentWaveNum ~= lastWaveNum then
+                        lastWaveNum = currentWaveNum
+                        print("Wave saat ini: " .. currentWaveNum)
+                        
+                        if currentWaveNum == START_WAVE and not isRunning then
+                            print("Mencapai Start Wave! Mengaktifkan Script...")
+                            setScriptState(true)
+                        elseif currentWaveNum == STOP_WAVE and isRunning then
+                            print("Mencapai Stop Wave! Mematikan Script...")
+                            setScriptState(false)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ==========================================
+-- MAIN LOOP (BACKGROUND PROCESS)
+-- ==========================================
+task.spawn(function()
+    while task.wait(LOOP_DELAY) do
+        if isRunning then
+            pcall(function()
+                -- Memilih salah satu data penempatan dari tabel secara acak
+                local randomPlace = PLACEMENTS[math.random(1, #PLACEMENTS)]
+
+                -- Payload disesuaikan khusus untuk TARGET_UNIT
+                local args = {
+                    TARGET_UNIT,
+                    {
+                        CF = randomPlace.CF,
+                        Rotation = 0,
+                        Valid = true,
+                        Position = randomPlace.Position
+                    }
+                }
+                ReplicatedStorage:WaitForChild("RemoteFunctions"):WaitForChild("PlaceUnit"):InvokeServer(unpack(args))
+            end)
+        end
+    end
+end)
