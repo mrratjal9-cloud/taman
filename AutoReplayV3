@@ -1,0 +1,453 @@
+-- ==========================================
+-- AUTO REPLAY V3 (Robust Play Again Click)
+-- Perbaikan dari V2:
+--   PROBLEM V2:
+--     1) Tombol "Play Again" tidak berhasil di-klik karena
+--        getconnections() mengembalikan 0 koneksi (game listen
+--        klik di parent / handler tidak langsung di button).
+--     2) DifficultyVote.Visible juga true di background bersamaan
+--        dengan GameEnd, sehingga STATE A jalan duluan dan
+--        RestartGame remote di-spam tanpa Play Again ter-klik.
+--
+--   FIX V3:
+--     a) Reorder state machine: GameEnd dapat prioritas mutlak.
+--        Selama gameEnd.Visible == true, script TIDAK akan fire
+--        PlaceDifficultyVote / RestartGame.
+--     b) virtualClick() multi-method:
+--          (1) getconnections + :Fire()
+--          (2) firesignal(signal) langsung (untuk parent-listener)
+--          (3) VirtualInputManager:SendMouseButtonEvent
+--              (klik mouse asli pada koordinat tombol)
+--     c) Click verification: setelah klik, cek apakah gameEnd
+--        hilang. Kalau belum, retry pakai method berikutnya.
+--     d) Klik ke button + childnya (Title) sebagai fallback.
+-- ==========================================
+
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local AUTO_START      = true
+local TARGET_DIF      = "dif_easy"
+local LOOP_INTERVAL   = 0.4
+local COOLDOWN_AGAIN  = 1.5    -- cooldown lebih kecil agar retry cepat
+local COOLDOWN_VOTE   = 4
+local CLICK_VERIFY_T  = 0.8    -- waktu tunggu verifikasi klik berhasil
+
+-- ==========================================
+-- SERVICES
+-- ==========================================
+local CoreGui              = game:GetService("CoreGui")
+local UserInputService     = game:GetService("UserInputService")
+local ReplicatedStorage    = game:GetService("ReplicatedStorage")
+local Players              = game:GetService("Players")
+local LocalPlayer          = Players.LocalPlayer
+local VirtualInputManager  = nil
+pcall(function() VirtualInputManager = game:GetService("VirtualInputManager") end)
+
+-- ==========================================
+-- STATE
+-- ==========================================
+local isRunning    = AUTO_START
+local lastAgainAt  = 0
+local lastVoteAt   = 0
+local clickAttempt = 0  -- counter retry method
+
+-- ==========================================
+-- GUI
+-- ==========================================
+if CoreGui:FindFirstChild("AutoRestartGUI") then
+    CoreGui.AutoRestartGUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoRestartGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 250, 0, 170)
+MainFrame.Position = UDim2.new(1, -260, 0.5, -85)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Restart V3 (Robust)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.8, 0, 0, 36)
+ToggleBtn.Position = UDim2.new(0.1, 0, 0, 8)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 16
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = ContentFrame
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local DifBtn = Instance.new("TextButton")
+DifBtn.Size = UDim2.new(0.8, 0, 0, 26)
+DifBtn.Position = UDim2.new(0.1, 0, 0, 50)
+DifBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+DifBtn.Text = "Difficulty: " .. TARGET_DIF
+DifBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+DifBtn.Font = Enum.Font.Gotham
+DifBtn.TextSize = 12
+DifBtn.AutoButtonColor = true
+DifBtn.Parent = ContentFrame
+Instance.new("UICorner", DifBtn).CornerRadius = UDim.new(0, 6)
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.new(1, -20, 0, 50)
+StatusLbl.Position = UDim2.new(0, 10, 0, 82)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text = "Idle"
+StatusLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.TextWrapped = true
+StatusLbl.TextXAlignment = Enum.TextXAlignment.Center
+StatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+StatusLbl.Parent = ContentFrame
+
+local function setStatus(txt)
+    StatusLbl.Text = tostring(txt)
+end
+
+-- Drag
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging  = true
+        dragStart = input.Position
+        startPos  = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentFrame.Visible = not minimized
+    MainFrame.Size = minimized and UDim2.new(0, 250, 0, 30) or UDim2.new(0, 250, 0, 170)
+end)
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+ToggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+    setStatus(isRunning and "Running..." or "Paused")
+end)
+
+local DIFFICULTIES = { "dif_easy", "dif_normal", "dif_hard", "dif_insane", "dif_impossible", "dif_apocalypse" }
+local function nextDif(cur)
+    for i, v in ipairs(DIFFICULTIES) do
+        if v == cur then return DIFFICULTIES[(i % #DIFFICULTIES) + 1] end
+    end
+    return DIFFICULTIES[1]
+end
+DifBtn.MouseButton1Click:Connect(function()
+    TARGET_DIF = nextDif(TARGET_DIF)
+    DifBtn.Text = "Difficulty: " .. TARGET_DIF
+end)
+
+-- ==========================================
+-- HELPERS
+-- ==========================================
+local function safeFindChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+local function getRemote(name)
+    local remotes = ReplicatedStorage:FindFirstChild("RemoteFunctions")
+    if not remotes then return nil end
+    return remotes:FindFirstChild(name)
+end
+
+local function invokeRemote(name, ...)
+    local r = getRemote(name)
+    if not r then
+        warn("[AutoReplayV3] Remote tidak ditemukan: " .. name)
+        return false
+    end
+    local args = { ... }
+    local ok, err = pcall(function() r:InvokeServer(unpack(args)) end)
+    if not ok then warn("[AutoReplayV3] Invoke " .. name .. " gagal: " .. tostring(err)) end
+    return ok
+end
+
+-- ==========================================
+-- VIRTUAL CLICK (3-method robust)
+-- ==========================================
+-- Method 1: getconnections + :Fire() (untuk listener langsung di button)
+local function clickViaConnections(button)
+    if typeof(getconnections) ~= "function" then return false end
+    local fired = false
+    local signals = { "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }
+    for _, sig in ipairs(signals) do
+        pcall(function()
+            local ev = button[sig]
+            if ev then
+                local conns = getconnections(ev)
+                if conns then
+                    for _, c in ipairs(conns) do
+                        local ok = pcall(function() c:Fire() end)
+                        if not ok and typeof(firesignal) == "function" then
+                            pcall(function() firesignal(c) end)
+                        end
+                        fired = true
+                    end
+                end
+            end
+        end)
+    end
+    return fired
+end
+
+-- Method 2: firesignal langsung di signalnya (untuk parent-listener)
+local function clickViaFiresignal(button)
+    if typeof(firesignal) ~= "function" then return false end
+    local signals = { "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }
+    local fired = false
+    for _, sig in ipairs(signals) do
+        pcall(function()
+            if button[sig] then
+                firesignal(button[sig])
+                fired = true
+            end
+        end)
+    end
+    return fired
+end
+
+-- Method 3: VirtualInputManager - klik mouse asli pada koordinat tombol
+local function clickViaVIM(button)
+    if not VirtualInputManager then return false end
+    local ok = pcall(function()
+        local pos  = button.AbsolutePosition
+        local size = button.AbsoluteSize
+        local x = pos.X + size.X / 2
+        local y = pos.Y + size.Y / 2
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true,  game, 0)
+        task.wait(0.07)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end)
+    return ok
+end
+
+-- All-in-one: pakai method yang berbeda tiap retry
+local function virtualClick(button, attempt)
+    if not button then return end
+    attempt = attempt or 1
+
+    -- Klik ke button + child Title (banyak game listen di Title)
+    local targets = { button }
+    local title = button:FindFirstChild("Title")
+    if title and (title:IsA("TextLabel") or title:IsA("ImageLabel") or title:IsA("TextButton") or title:IsA("ImageButton")) then
+        table.insert(targets, title)
+    end
+
+    for _, t in ipairs(targets) do
+        if attempt == 1 then
+            clickViaConnections(t)
+            clickViaFiresignal(t)
+        elseif attempt == 2 then
+            clickViaFiresignal(t)
+            clickViaVIM(t)
+        else
+            clickViaVIM(t)
+            clickViaConnections(t)
+            clickViaFiresignal(t)
+        end
+    end
+end
+
+-- ==========================================
+-- PATH RESOLVERS
+-- ==========================================
+local function getAgainButton()
+    local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+    local gameGui = safeFindChild(pGui, "GameGui")
+    local screen  = safeFindChild(gameGui, "Screen")
+    local middle  = safeFindChild(screen, "Middle")
+    local gameEnd = safeFindChild(middle, "GameEnd")
+    local items1  = safeFindChild(gameEnd, "Items")
+    local frame   = safeFindChild(items1, "Frame")
+    local actions = safeFindChild(frame, "Actions")
+    local items2  = safeFindChild(actions, "Items")
+    local again   = safeFindChild(items2, "Again")
+    return again, gameEnd
+end
+
+local function getDifficultyButton()
+    local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+    local gameGui = safeFindChild(pGui, "GameGui")
+    local screen  = safeFindChild(gameGui, "Screen")
+    local middle  = safeFindChild(screen, "Middle")
+    local difVote = safeFindChild(middle, "DifficultyVote")
+    local items1  = safeFindChild(difVote, "Items")
+    local frame   = safeFindChild(items1, "Frame")
+    local items2  = safeFindChild(frame, "Items")
+    local items3  = safeFindChild(items2, "Items")
+    local btn     = safeFindChild(items3, TARGET_DIF)
+    return btn, difVote
+end
+
+-- ==========================================
+-- MAIN LOOP (PRIORITAS GameEnd)
+-- ==========================================
+task.spawn(function()
+    setStatus(isRunning and "Running..." or "Paused")
+    while true do
+        task.wait(LOOP_INTERVAL)
+
+        local ok, err = pcall(function()
+            if not isRunning then return end
+            local now = os.clock()
+
+            -- ============================================
+            -- PRIORITAS 1: GameEnd / Play Again
+            -- Selama GameEnd visible, JANGAN sentuh DifficultyVote.
+            -- ============================================
+            local againBtn, gameEnd = getAgainButton()
+            if gameEnd and gameEnd.Visible == true then
+                if (now - lastAgainAt) < COOLDOWN_AGAIN then return end
+
+                if not againBtn then
+                    setStatus("GameEnd visible tapi tombol Again belum ready...")
+                    return
+                end
+
+                clickAttempt = clickAttempt + 1
+                if clickAttempt > 3 then clickAttempt = 1 end
+
+                setStatus(string.format("Klik Play Again (method %d)...", clickAttempt))
+                print("[AutoReplayV3] Klik Play Again, attempt =", clickAttempt)
+
+                virtualClick(againBtn, clickAttempt)
+                lastAgainAt = os.clock()
+
+                -- Verifikasi: tunggu lalu cek apakah GameEnd hilang
+                task.wait(CLICK_VERIFY_T)
+                local _, geAfter = getAgainButton()
+                if (not geAfter) or (geAfter.Visible == false) then
+                    setStatus("Play Again berhasil di-klik!")
+                    clickAttempt = 0
+                else
+                    setStatus(string.format("Klik gagal (method %d), retry method berikutnya...", clickAttempt))
+                end
+                return  -- WAJIB: jangan lanjut ke STATE A selama GameEnd masih ada
+            end
+
+            -- ============================================
+            -- PRIORITAS 2: DifficultyVote (hanya jika GameEnd sudah hilang)
+            -- ============================================
+            local difBtn, difVote = getDifficultyButton()
+            if difVote and difVote.Visible == true then
+                if (now - lastVoteAt) < COOLDOWN_VOTE then return end
+
+                setStatus("Vote " .. TARGET_DIF .. " + RestartGame...")
+                print("[AutoReplayV3] Vote difficulty:", TARGET_DIF)
+
+                if difBtn then
+                    virtualClick(difBtn, 1)
+                    task.wait(0.25)
+                end
+
+                invokeRemote("PlaceDifficultyVote", TARGET_DIF)
+                task.wait(0.4)
+                invokeRemote("RestartGame")
+
+                lastVoteAt = os.clock()
+                setStatus("RestartGame fired. Tunggu game restart...")
+                task.wait(1)
+                return
+            end
+
+            -- IDLE
+            setStatus("Running... (menunggu GameEnd / DifficultyVote)")
+        end)
+
+        if not ok then
+            warn("[AutoReplayV3] Iterasi error: " .. tostring(err))
+            setStatus("Error: " .. tostring(err))
+        end
+    end
+end)
+
+print("[AutoReplayV3] Loaded. Difficulty=" .. TARGET_DIF .. " | Status=" .. (isRunning and "ON" or "OFF"))
