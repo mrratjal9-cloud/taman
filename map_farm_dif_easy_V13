@@ -1,0 +1,1107 @@
+-- ==========================================
+-- AUTO PLACE UNIT V13 (Countdown-Triggered Placement)
+-- ==========================================
+-- Update dari V12:
+--   1) Wave reader detect 3 jenis sinyal: COUNTDOWN, INCOMING, WAVE.
+--      - COUNTDOWN: text Title cuma angka (5,4,3,2,1) sebelum game mulai
+--      - INCOMING : text 'Enemies incoming!'
+--      - WAVE     : text mengandung 'Wave X'
+--   2) Placement gate UNLOCK saat COUNTDOWN ATAU INCOMING (mana duluan).
+--      Place mulai dari countdown 5, bukan tunggu 'Enemies incoming!'.
+--   3) 'Enemies incoming!' tetap dipakai untuk game counter & restart.
+-- ==========================================
+
+print("[AutoPlaceV13] Boot: starting...")
+
+local _unpack = table.unpack or unpack
+math.randomseed(tick() * 1000 % 2147483647)
+for i = 1, 8 do math.random() end
+
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local CONFIG = {
+
+    -- ============= CORE =============
+    AUTO_START   = true,
+    TARGET_UNIT  = "unit_tomato_plant",
+
+    -- ============= TIMING =============
+    BOOT_DELAY   = 1.0,
+    LOOP_DELAY   = 0.10,
+    LOOP_JITTER  = 0.04,
+
+    -- ============= PRIORITY =============
+    PRIORITY_LOCK         = true,
+    PRIORITY_DELAY        = 0.40,
+    PRIORITY_MAX_TRIES    = 9999,
+    PRIORITY_VERIFY_UI    = true,
+
+    -- ============= PLACEMENT GATE (V13) =============
+    REQUIRE_PLACEMENT_GATE    = true,   -- false = no gate
+    UNLOCK_ON_COUNTDOWN       = true,   -- angka countdown (5,4,3,2,1) unlock
+    UNLOCK_ON_INCOMING        = true,   -- 'Enemies incoming!' unlock (fallback)
+    COUNTDOWN_MIN             = 1,
+    COUNTDOWN_MAX             = 10,
+    MAIN_START_WAVE           = 2,
+    MAIN_REQUIRES_PRIORITY_OK = true,
+
+    -- ============= WAVE CONTROL =============
+    WAVE_CONTROL      = true,
+    START_WAVE        = 1,
+    STOP_WAVE         = 11,
+    WAVE_BOOT_TIMEOUT = 8.0,
+
+    -- ============= AUTO-RESTART =============
+    AUTO_RESET                 = true,
+    DETECT_WAVE_DECREASE       = true,
+    DETECT_INCOMING_AFTER_STOP = true,
+    RESET_COOLDOWN             = 1.5,
+
+    -- ============= CAP =============
+    PlacementUnitMaxCap   = 20,
+    CAP_COUNT_ONLY_TARGET = true,
+
+    -- ============= ANTI-MACRO =============
+    POSITION_OFFSET = 0.05,
+    ROTATION_MODE   = "step90",
+    FIXED_ROT_DEG   = 0,
+
+    -- ============= BACKUP =============
+    USE_BACKUP        = true,
+    BACKUP_AFTER_WAVE = 5,
+    BACKUP_CHANCE     = 0.5,
+
+    -- ============= FAILURE =============
+    MAX_RETRY = 3,
+
+    -- ============= LOGGING =============
+    VERBOSE       = false,
+    LOUD_PRIORITY = true,
+    DEBUG_GATE    = true,
+}
+
+-- ==========================================
+-- PLACEMENT SLOTS
+-- ==========================================
+local SLOTS_PRIORITY = {
+    -- AWAL (krusial, harus duluan)
+    { -332.48974609375, 61.68030548095703, -105.15811920166016 },
+    { -338.4619140625,  61.68030548095703, -105.03054809570312 },
+}
+
+local SLOTS_MAIN = {
+    -- LAYER 1
+    { -332.26861572265625, 61.68030548095703, -134.24404907226562 },
+    { -332.26861572265625, 61.68030548095703, -131.9630126953125  },
+    { -332.26861572265625, 61.68030548095703, -129.72555541992188 },
+    { -332.26861572265625, 61.68030548095703, -127.57781982421875 },
+    { -332.26861572265625, 61.68030548095703, -125.37130737304688 },
+    { -332.26861572265625, 61.68030548095703, -123.1337890625     },
+    -- LAYER 2
+    { -330.1163024902344, 61.68030548095703, -134.24404907226562 },
+    { -330.1163024902344, 61.68030548095703, -131.9630126953125  },
+    { -330.1163024902344, 61.68030548095703, -129.72555541992188 },
+    { -330.1163024902344, 61.68030548095703, -127.57781982421875 },
+    { -330.1163024902344, 61.68030548095703, -125.37130737304688 },
+    { -330.1163024902344, 61.68030548095703, -123.1337890625     },
+    -- LAYER 3
+    { -327.88763427734375, 61.68030548095703, -134.24404907226562 },
+    { -327.88763427734375, 61.68030548095703, -131.9630126953125  },
+    { -327.88763427734375, 61.68030548095703, -129.72555541992188 },
+    { -327.88763427734375, 61.68030548095703, -127.57781982421875 },
+    { -327.88763427734375, 61.68030548095703, -125.37130737304688 },
+    { -327.88763427734375, 61.68030548095703, -123.1337890625     },
+}
+
+local SLOTS_BACKUP = {}
+
+print(string.format("[AutoPlaceV13] Slots: priority=%d main=%d backup=%d  cap=%d",
+    #SLOTS_PRIORITY, #SLOTS_MAIN, #SLOTS_BACKUP, CONFIG.PlacementUnitMaxCap))
+
+-- SERVICES
+local CoreGui            = game:GetService("CoreGui")
+local UserInputService   = game:GetService("UserInputService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local LocalPlayer        = Players.LocalPlayer
+
+-- STATE
+local isRunning           = CONFIG.AUTO_START
+local prioritySatisfied   = {}
+local priorityAttempts    = {}
+local mainSatisfied       = {}
+local mainBag, backupBag  = {}, {}
+local stats = {
+    placed_p = 0, ok_p = 0, fail_p = 0,
+    placed_m = 0, ok_m = 0, fail_m = 0,
+    placed_b = 0, ok_b = 0, fail_b = 0,
+}
+local lastResult           = "-"
+local lastWaveNum          = -1
+local lastWaveTextRaw      = "-"
+local maxWaveSeen          = -1
+local enemiesIncomingSeen  = false
+local placementUnlocked    = false
+local unlockSource         = "-"
+local lastCountdownSeen    = -1
+local currentPhase         = "init"
+local gameCount            = 1
+local lastResetAt          = 0
+local pendingReset         = false
+local pausedUntil          = 0
+local lastUITargetCount    = 0
+local lastUIAllUnits       = 0
+local capReached           = false
+
+-- HELPERS
+local function randFloat(a, b) return a + (b - a) * math.random() end
+local function randInt(a, b)   return math.random(a, b) end
+local function strLower(s) if type(s) ~= "string" then return "" end; return string.lower(s) end
+local function strContains(s, n) if type(s) ~= "string" or type(n) ~= "string" then return false end; return string.find(s, n, 1, true) ~= nil end
+local function startsWith(s, p) if type(s) ~= "string" or type(p) ~= "string" then return false end; return string.sub(s, 1, #p) == p end
+local function trim(s) if type(s) ~= "string" then return "" end; return (string.match(s, "^%s*(.-)%s*$")) or s end
+
+local function hasPendingPriority()
+    if not CONFIG.PRIORITY_LOCK then return false end
+    for i = 1, #SLOTS_PRIORITY do
+        if not prioritySatisfied[i] and priorityAttempts[i] < CONFIG.PRIORITY_MAX_TRIES then
+            return true
+        end
+    end
+    return false
+end
+local function hasGivenUpPriority()
+    if not CONFIG.PRIORITY_LOCK then return false end
+    for i = 1, #SLOTS_PRIORITY do
+        if not prioritySatisfied[i] and priorityAttempts[i] >= CONFIG.PRIORITY_MAX_TRIES then
+            return true
+        end
+    end
+    return false
+end
+
+-- ==========================================
+-- WAVE READER (V13: COUNTDOWN/INCOMING/WAVE)
+-- ==========================================
+local function readWaveOnce()
+    local ok, num, raw, kind = pcall(function()
+        local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+        local ggn     = pGui    and pGui:FindFirstChild("GameGuiNoInset")
+        local screen  = ggn     and ggn:FindFirstChild("Screen")
+        local top     = screen  and screen:FindFirstChild("Top")
+        local info    = top     and top:FindFirstChild("GameInfo")
+        local content = info    and info:FindFirstChild("Content")
+        local waves   = content and content:FindFirstChild("Waves")
+        local title   = waves   and waves:FindFirstChild("Title")
+        if title and title.Text and title.Text ~= "" then
+            local t   = title.Text
+            local low = string.lower(t)
+
+            -- INCOMING: contain "enemies" + "incoming"
+            if string.find(low, "enemies", 1, true)
+               and string.find(low, "incoming", 1, true) then
+                return nil, t, "INCOMING"
+            end
+
+            -- WAVE: contain "Wave" word
+            local waveNum = string.match(t, "[Ww][Aa][Vv][Ee]%s*(%d+)")
+            if waveNum then
+                return tonumber(waveNum), t, "WAVE"
+            end
+
+            -- COUNTDOWN: text just a number
+            local trimmed = trim(t)
+            local cdNum = string.match(trimmed, "^(%d+)$")
+            if cdNum then
+                local n = tonumber(cdNum)
+                if n
+                   and n >= (CONFIG.COUNTDOWN_MIN or 1)
+                   and n <= (CONFIG.COUNTDOWN_MAX or 10) then
+                    return n, t, "COUNTDOWN"
+                end
+            end
+
+            return nil, t, "OTHER"
+        end
+        return nil, nil, "EMPTY"
+    end)
+    if not ok then return nil, nil, "ERROR" end
+    return num, raw, kind
+end
+
+-- UI READER (placement count)
+local function readPlacedUnits()
+    local ok, allUnits, target = pcall(function()
+        local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+        local gameGui = pGui    and pGui:FindFirstChild("GameGui")
+        local screen  = gameGui and gameGui:FindFirstChild("Screen")
+        local middle  = screen  and screen:FindFirstChild("Middle")
+        local unitMgr = middle  and middle:FindFirstChild("UnitManager")
+        local items1  = unitMgr and unitMgr:FindFirstChild("Items")
+        local frame   = items1  and items1:FindFirstChild("Frame")
+        local items2  = frame   and frame:FindFirstChild("Items")
+        local items3  = items2  and items2:FindFirstChild("Items")
+        local scroll  = items3  and items3:FindFirstChild("ScrollingFrame")
+        if not scroll then return 0, 0 end
+        local au, tg = 0, 0
+        for _, child in ipairs(scroll:GetChildren()) do
+            if startsWith(child.Name, "unit_") then
+                au = au + 1
+                if child.Name == CONFIG.TARGET_UNIT then tg = tg + 1 end
+            end
+        end
+        return au, tg
+    end)
+    if not ok then return 0, 0 end
+    return allUnits or 0, target or 0
+end
+
+local function refreshUICounts()
+    local au, tg = readPlacedUnits()
+    lastUIAllUnits    = au
+    lastUITargetCount = tg
+    local cnt = CONFIG.CAP_COUNT_ONLY_TARGET and tg or au
+    capReached = cnt >= CONFIG.PlacementUnitMaxCap
+end
+
+local function checkCapBeforePlacement()
+    refreshUICounts()
+    return capReached
+end
+
+-- ==========================================
+-- GATES
+-- ==========================================
+local function canPlaceAnything()
+    if CONFIG.REQUIRE_PLACEMENT_GATE and not placementUnlocked then
+        return false, "menunggu countdown / 'Enemies incoming!'"
+    end
+    return true, "ok"
+end
+
+local function canStartMainPhase()
+    local can, reason = canPlaceAnything()
+    if not can then return false, reason end
+    if hasPendingPriority() then return false, "menunggu priority done" end
+    if CONFIG.MAIN_REQUIRES_PRIORITY_OK and hasGivenUpPriority() then
+        return false, "priority GIVEUP, main locked"
+    end
+    if lastWaveNum < 0 then return false, "menunggu wave terdeteksi" end
+    if lastWaveNum < CONFIG.MAIN_START_WAVE then
+        return false, string.format("menunggu wave >= %d (sekarang %d)",
+            CONFIG.MAIN_START_WAVE, lastWaveNum)
+    end
+    return true, "ok"
+end
+
+-- SHUFFLE-BAG
+local function buildBag(n)
+    local bag = {}
+    for i = 1, n do bag[i] = i end
+    for i = n, 2, -1 do
+        local j = randInt(1, i)
+        bag[i], bag[j] = bag[j], bag[i]
+    end
+    return bag
+end
+local function refillMainBag()   mainBag   = buildBag(#SLOTS_MAIN)   end
+local function refillBackupBag() backupBag = buildBag(#SLOTS_BACKUP) end
+
+-- INIT / RESET
+local function initSlotState()
+    for i = 1, #SLOTS_PRIORITY do
+        prioritySatisfied[i] = false
+        priorityAttempts[i]  = 0
+    end
+    for i = 1, #SLOTS_MAIN do mainSatisfied[i] = false end
+    refillMainBag()
+    if #SLOTS_BACKUP > 0 then refillBackupBag() end
+    capReached        = false
+    lastUITargetCount = 0
+    lastUIAllUnits    = 0
+end
+initSlotState()
+
+local function performReset(reason)
+    initSlotState()
+    enemiesIncomingSeen = false
+    placementUnlocked   = false
+    unlockSource        = "-"
+    lastCountdownSeen   = -1
+    lastWaveNum         = -1
+    maxWaveSeen         = -1
+    gameCount    = gameCount + 1
+    lastResetAt  = os.clock()
+    pausedUntil  = os.clock() + CONFIG.RESET_COOLDOWN
+    currentPhase = "reset (cooldown)"
+    pendingReset = false
+    lastResult   = string.format("RESET game #%d: %s", gameCount, tostring(reason))
+    print(string.format("[AutoPlaceV13] === RESET TRIGGERED === game #%d | reason: %s",
+        gameCount, tostring(reason)))
+end
+
+-- ==========================================
+-- GUI
+-- ==========================================
+if CoreGui:FindFirstChild("AutoPlaceGUI") then CoreGui.AutoPlaceGUI:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoPlaceGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 340, 0, 400)
+MainFrame.Position = UDim2.new(0.5, -170, 0.5, -200)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Place V13 (Countdown Trigger)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local PhaseBanner = Instance.new("TextLabel")
+PhaseBanner.Size = UDim2.new(0.95, 0, 0, 32)
+PhaseBanner.Position = UDim2.new(0.025, 0, 0, 6)
+PhaseBanner.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
+PhaseBanner.Text = "BOOTING..."
+PhaseBanner.TextColor3 = Color3.fromRGB(0, 0, 0)
+PhaseBanner.Font = Enum.Font.GothamBlack
+PhaseBanner.TextSize = 14
+PhaseBanner.Parent = ContentFrame
+Instance.new("UICorner", PhaseBanner).CornerRadius = UDim.new(0, 6)
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.4, 0, 0, 28)
+ToggleBtn.Position = UDim2.new(0.025, 0, 0, 44)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 12
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = ContentFrame
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local RotBtn = Instance.new("TextButton")
+RotBtn.Size = UDim2.new(0.27, 0, 0, 28)
+RotBtn.Position = UDim2.new(0.435, 0, 0, 44)
+RotBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+RotBtn.Text = "Rot: " .. CONFIG.ROTATION_MODE
+RotBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+RotBtn.Font = Enum.Font.Gotham
+RotBtn.TextSize = 11
+RotBtn.Parent = ContentFrame
+Instance.new("UICorner", RotBtn).CornerRadius = UDim.new(0, 6)
+
+local ResetBtn = Instance.new("TextButton")
+ResetBtn.Size = UDim2.new(0.27, 0, 0, 28)
+ResetBtn.Position = UDim2.new(0.715, 0, 0, 44)
+ResetBtn.BackgroundColor3 = Color3.fromRGB(180, 110, 60)
+ResetBtn.Text = "Reset Slots"
+ResetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ResetBtn.Font = Enum.Font.GothamBold
+ResetBtn.TextSize = 11
+ResetBtn.Parent = ContentFrame
+Instance.new("UICorner", ResetBtn).CornerRadius = UDim.new(0, 6)
+
+local PrioListLbl = Instance.new("TextLabel")
+PrioListLbl.Size = UDim2.new(1, -20, 0, 30)
+PrioListLbl.Position = UDim2.new(0, 10, 0, 80)
+PrioListLbl.BackgroundTransparency = 1
+PrioListLbl.Text = "Priority: -"
+PrioListLbl.TextColor3 = Color3.fromRGB(255, 220, 130)
+PrioListLbl.Font = Enum.Font.Gotham
+PrioListLbl.TextSize = 11
+PrioListLbl.TextWrapped = true
+PrioListLbl.TextXAlignment = Enum.TextXAlignment.Left
+PrioListLbl.TextYAlignment = Enum.TextYAlignment.Top
+PrioListLbl.Parent = ContentFrame
+
+local PlacedLbl = Instance.new("TextLabel")
+PlacedLbl.Size = UDim2.new(1, -20, 0, 14)
+PlacedLbl.Position = UDim2.new(0, 10, 0, 116)
+PlacedLbl.BackgroundTransparency = 1
+PlacedLbl.Text = "Placed: 0/20"
+PlacedLbl.TextColor3 = Color3.fromRGB(160, 230, 200)
+PlacedLbl.Font = Enum.Font.GothamBold
+PlacedLbl.TextSize = 12
+PlacedLbl.TextXAlignment = Enum.TextXAlignment.Left
+PlacedLbl.Parent = ContentFrame
+
+local StatsLbl = Instance.new("TextLabel")
+StatsLbl.Size = UDim2.new(1, -20, 0, 14)
+StatsLbl.Position = UDim2.new(0, 10, 0, 132)
+StatsLbl.BackgroundTransparency = 1
+StatsLbl.Text = "OK P:0 M:0 B:0  |  Fail P:0 M:0 B:0"
+StatsLbl.TextColor3 = Color3.fromRGB(180, 200, 220)
+StatsLbl.Font = Enum.Font.Gotham
+StatsLbl.TextSize = 11
+StatsLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatsLbl.Parent = ContentFrame
+
+local WaveLbl = Instance.new("TextLabel")
+WaveLbl.Size = UDim2.new(1, -20, 0, 14)
+WaveLbl.Position = UDim2.new(0, 10, 0, 148)
+WaveLbl.BackgroundTransparency = 1
+WaveLbl.Text = "Wave: -  |  Gate>=2"
+WaveLbl.TextColor3 = Color3.fromRGB(220, 200, 180)
+WaveLbl.Font = Enum.Font.Gotham
+WaveLbl.TextSize = 11
+WaveLbl.TextXAlignment = Enum.TextXAlignment.Left
+WaveLbl.Parent = ContentFrame
+
+local UnlockLbl = Instance.new("TextLabel")
+UnlockLbl.Size = UDim2.new(1, -20, 0, 14)
+UnlockLbl.Position = UDim2.new(0, 10, 0, 164)
+UnlockLbl.BackgroundTransparency = 1
+UnlockLbl.Text = "Placement: LOCKED"
+UnlockLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+UnlockLbl.Font = Enum.Font.GothamBold
+UnlockLbl.TextSize = 11
+UnlockLbl.TextXAlignment = Enum.TextXAlignment.Left
+UnlockLbl.Parent = ContentFrame
+
+local IncomingLbl = Instance.new("TextLabel")
+IncomingLbl.Size = UDim2.new(1, -20, 0, 14)
+IncomingLbl.Position = UDim2.new(0, 10, 0, 180)
+IncomingLbl.BackgroundTransparency = 1
+IncomingLbl.Text = "Game-Counter: not started"
+IncomingLbl.TextColor3 = Color3.fromRGB(200, 180, 220)
+IncomingLbl.Font = Enum.Font.Gotham
+IncomingLbl.TextSize = 11
+IncomingLbl.TextXAlignment = Enum.TextXAlignment.Left
+IncomingLbl.Parent = ContentFrame
+
+local WaveRawLbl = Instance.new("TextLabel")
+WaveRawLbl.Size = UDim2.new(1, -20, 0, 14)
+WaveRawLbl.Position = UDim2.new(0, 10, 0, 196)
+WaveRawLbl.BackgroundTransparency = 1
+WaveRawLbl.Text = "WaveTxt: -"
+WaveRawLbl.TextColor3 = Color3.fromRGB(150, 170, 200)
+WaveRawLbl.Font = Enum.Font.Gotham
+WaveRawLbl.TextSize = 10
+WaveRawLbl.TextXAlignment = Enum.TextXAlignment.Left
+WaveRawLbl.Parent = ContentFrame
+
+local GameLbl = Instance.new("TextLabel")
+GameLbl.Size = UDim2.new(1, -20, 0, 14)
+GameLbl.Position = UDim2.new(0, 10, 0, 212)
+GameLbl.BackgroundTransparency = 1
+GameLbl.Text = "Game #1  |  Last reset: -"
+GameLbl.TextColor3 = Color3.fromRGB(220, 180, 220)
+GameLbl.Font = Enum.Font.Gotham
+GameLbl.TextSize = 11
+GameLbl.TextXAlignment = Enum.TextXAlignment.Left
+GameLbl.Parent = ContentFrame
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.new(1, -20, 0, 90)
+StatusLbl.Position = UDim2.new(0, 10, 0, 230)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text = "Last: -"
+StatusLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.TextWrapped = true
+StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+StatusLbl.Parent = ContentFrame
+
+local function isBackupActive()
+    if not CONFIG.USE_BACKUP then return false end
+    if #SLOTS_BACKUP == 0 then return false end
+    if lastWaveNum < CONFIG.BACKUP_AFTER_WAVE then return false end
+    return true
+end
+
+local function setBanner(text, bgColor)
+    PhaseBanner.Text = text
+    if bgColor then PhaseBanner.BackgroundColor3 = bgColor end
+end
+local function fmtTime(t)
+    if t <= 0 then return "-" end
+    return string.format("%.1fs ago", os.clock() - t)
+end
+
+local function refreshStats()
+    local lines = {}
+    for i = 1, #SLOTS_PRIORITY do
+        local mark
+        if prioritySatisfied[i] then mark = "OK"
+        elseif priorityAttempts[i] >= CONFIG.PRIORITY_MAX_TRIES then mark = "GIVEUP"
+        else mark = "trying(" .. priorityAttempts[i] .. ")" end
+        lines[#lines + 1] = "P" .. i .. ":" .. mark
+    end
+    PrioListLbl.Text = "Priority:  " .. table.concat(lines, "  ")
+
+    local cnt, lbl
+    if CONFIG.CAP_COUNT_ONLY_TARGET then
+        cnt = lastUITargetCount; lbl = CONFIG.TARGET_UNIT
+    else
+        cnt = lastUIAllUnits; lbl = "all units"
+    end
+    local capStr = string.format("%d/%d  %s", cnt, CONFIG.PlacementUnitMaxCap, lbl)
+    if capReached then capStr = capStr .. "  [CAP]" end
+    PlacedLbl.Text = "Placed: " .. capStr
+
+    StatsLbl.Text = string.format("OK P:%d M:%d B:%d  |  Fail P:%d M:%d B:%d",
+        stats.ok_p, stats.ok_m, stats.ok_b,
+        stats.fail_p, stats.fail_m, stats.fail_b)
+
+    local backupTxt = isBackupActive() and "ACTIVE" or "idle"
+    WaveLbl.Text = string.format("Wave: %s  |  Gate>=%d  Backup:%s",
+        (lastWaveNum >= 0 and tostring(lastWaveNum) or "-"),
+        CONFIG.MAIN_START_WAVE or 1, backupTxt)
+
+    if placementUnlocked then
+        UnlockLbl.Text       = "Placement: UNLOCKED via " .. unlockSource
+        UnlockLbl.TextColor3 = Color3.fromRGB(150, 230, 150)
+    else
+        UnlockLbl.Text       = "Placement: LOCKED (waiting countdown/incoming)"
+        UnlockLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+    end
+
+    if enemiesIncomingSeen then
+        IncomingLbl.Text       = "Game-Counter: incoming detected (game tracked)"
+        IncomingLbl.TextColor3 = Color3.fromRGB(180, 200, 240)
+    else
+        IncomingLbl.Text       = "Game-Counter: belum incoming (game belum tracked)"
+        IncomingLbl.TextColor3 = Color3.fromRGB(200, 180, 220)
+    end
+
+    WaveRawLbl.Text = "WaveTxt: " .. tostring(lastWaveTextRaw)
+    GameLbl.Text    = string.format("Game #%d  |  Last reset: %s",
+        gameCount, fmtTime(lastResetAt))
+    StatusLbl.Text  = "Last: " .. tostring(lastResult)
+end
+
+print("[AutoPlaceV13] GUI built")
+
+-- DRAG SYSTEM
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- BUTTONS
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentFrame.Visible = not minimized
+    MainFrame.Size = minimized and UDim2.new(0, 340, 0, 30) or UDim2.new(0, 340, 0, 400)
+end)
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+local function setScriptState(state)
+    isRunning = state
+    if isRunning then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(80, 200, 80)
+        ToggleBtn.Text = "Status: ON"
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+        ToggleBtn.Text = "Status: OFF"
+    end
+end
+ToggleBtn.MouseButton1Click:Connect(function() setScriptState(not isRunning) end)
+
+local ROT_MODES = { "step90", "smooth", "fixed", "off" }
+local function nextRotMode(cur)
+    for i = 1, #ROT_MODES do
+        if ROT_MODES[i] == cur then return ROT_MODES[(i % #ROT_MODES) + 1] end
+    end
+    return ROT_MODES[1]
+end
+RotBtn.MouseButton1Click:Connect(function()
+    CONFIG.ROTATION_MODE = nextRotMode(CONFIG.ROTATION_MODE)
+    RotBtn.Text = "Rot: " .. CONFIG.ROTATION_MODE
+end)
+ResetBtn.MouseButton1Click:Connect(function()
+    pendingReset = true
+    print("[AutoPlaceV13] Manual reset requested by user.")
+end)
+
+-- ROTATION & ARGS
+local function pickRotationDeg()
+    local m = CONFIG.ROTATION_MODE
+    if m == "off"    then return 0 end
+    if m == "fixed"  then return CONFIG.FIXED_ROT_DEG or 0 end
+    if m == "smooth" then return randFloat(0, 360) end
+    local steps = { 0, 90, 180, 270 }
+    return steps[randInt(1, 4)]
+end
+local function buildArgs(slotXYZ)
+    local off = CONFIG.POSITION_OFFSET or 0
+    local dx, dz = 0, 0
+    if off > 0 then
+        dx = randFloat(-off, off)
+        dz = randFloat(-off, off)
+    end
+    local x = slotXYZ[1] + dx
+    local y = slotXYZ[2]
+    local z = slotXYZ[3] + dz
+    local rotDeg = pickRotationDeg()
+    local cf  = CFrame.new(x, y, z) * CFrame.Angles(0, math.rad(rotDeg), 0)
+    local pos = Vector3.new(x, y, z)
+    local args = {
+        CONFIG.TARGET_UNIT,
+        { CF = cf, Rotation = rotDeg, Valid = true, Position = pos }
+    }
+    return args, rotDeg
+end
+
+-- PLACEMENT REMOTE
+local placeUnitRemote
+local function getPlaceUnitRemote()
+    if placeUnitRemote and placeUnitRemote.Parent then return placeUnitRemote end
+    local rf = ReplicatedStorage:FindFirstChild("RemoteFunctions")
+    if rf then placeUnitRemote = rf:FindFirstChild("PlaceUnit") end
+    return placeUnitRemote
+end
+local function isSuccessReturn(ok, ret)
+    if not ok then return false end
+    if ret == false then return false end
+    if type(ret) == "string" and strContains(strLower(ret), "fail") then return false end
+    if type(ret) == "table" and ret.success == false then return false end
+    return true
+end
+
+-- PRIORITY PLACEMENT
+local function placePrioritySlot(idx)
+    if CONFIG.REQUIRE_PLACEMENT_GATE and not placementUnlocked then
+        if CONFIG.DEBUG_GATE then
+            print("[AutoPlaceV13] [GATE BLOCKED priority] placement locked")
+        end
+        lastResult = "GATE BLOCKED: placement locked"
+        return false
+    end
+
+    local remote = getPlaceUnitRemote()
+    if not remote then return false, "remote belum ready" end
+    if checkCapBeforePlacement() then
+        lastResult = "cap reached, abort priority"
+        return false
+    end
+
+    local _, beforeTarget = readPlacedUnits()
+    priorityAttempts[idx] = priorityAttempts[idx] + 1
+    local args, rotDeg = buildArgs(SLOTS_PRIORITY[idx])
+    local ok, ret = pcall(function()
+        return remote:InvokeServer(_unpack(args))
+    end)
+    local serverOk = isSuccessReturn(ok, ret)
+
+    local success
+    if CONFIG.PRIORITY_VERIFY_UI then
+        task.wait(0.2)
+        local _, afterTarget = readPlacedUnits()
+        success = serverOk and (afterTarget > beforeTarget)
+        lastUITargetCount = afterTarget
+    else
+        success = serverOk
+    end
+
+    local detail = string.format("[P%d try=%d] rot=%s ret=%s ui=%d",
+        idx, priorityAttempts[idx], tostring(rotDeg), tostring(ret), lastUITargetCount)
+
+    if success then
+        prioritySatisfied[idx] = true
+        stats.placed_p = stats.placed_p + 1
+        stats.ok_p     = stats.ok_p + 1
+        lastResult     = "OK " .. detail
+        if CONFIG.LOUD_PRIORITY then
+            print("[AutoPlaceV13] [PRIORITY OK] " .. detail)
+        end
+        return true
+    else
+        if priorityAttempts[idx] >= CONFIG.PRIORITY_MAX_TRIES then
+            stats.placed_p = stats.placed_p + 1
+            stats.fail_p   = stats.fail_p + 1
+            lastResult     = "FAIL (giveup) " .. detail
+            warn("[AutoPlaceV13] [PRIORITY GIVEUP] P" .. idx)
+        else
+            lastResult = "fail " .. detail
+            if CONFIG.LOUD_PRIORITY then
+                print("[AutoPlaceV13] [priority retry] " .. detail)
+            end
+        end
+        return false
+    end
+end
+
+-- MAIN/BACKUP PLACEMENT
+local function selectMainOrBackup()
+    if isBackupActive() and math.random() < CONFIG.BACKUP_CHANCE then
+        if #backupBag == 0 then refillBackupBag() end
+        local idx = table.remove(backupBag, 1)
+        return "B", idx, SLOTS_BACKUP[idx]
+    end
+    local pendingList = {}
+    for i = 1, #SLOTS_MAIN do
+        if not mainSatisfied[i] then pendingList[#pendingList + 1] = i end
+    end
+    if #pendingList > 0 then
+        local idx = pendingList[randInt(1, #pendingList)]
+        return "M", idx, SLOTS_MAIN[idx]
+    end
+    if #mainBag == 0 then refillMainBag() end
+    local idx = table.remove(mainBag, 1)
+    return "M", idx, SLOTS_MAIN[idx]
+end
+
+local function placeMainOrBackupOnce()
+    if CONFIG.REQUIRE_PLACEMENT_GATE and not placementUnlocked then
+        if CONFIG.DEBUG_GATE then
+            print("[AutoPlaceV13] [GATE BLOCKED main] placement locked")
+        end
+        lastResult = "GATE BLOCKED: placement locked"
+        return false
+    end
+    if hasPendingPriority() then
+        if CONFIG.DEBUG_GATE then
+            print("[AutoPlaceV13] [GATE BLOCKED main] priority masih pending")
+        end
+        return false
+    end
+    if lastWaveNum < CONFIG.MAIN_START_WAVE then
+        if CONFIG.DEBUG_GATE then
+            print("[AutoPlaceV13] [GATE BLOCKED main] wave " ..
+                tostring(lastWaveNum) .. " < " .. tostring(CONFIG.MAIN_START_WAVE))
+        end
+        return false
+    end
+
+    local remote = getPlaceUnitRemote()
+    if not remote then return false, "remote belum ready" end
+    if checkCapBeforePlacement() then
+        lastResult = "cap reached, abort main"
+        return false
+    end
+
+    local phaseTag, slotIdx, slotXYZ = selectMainOrBackup()
+    local args, rotDeg = buildArgs(slotXYZ)
+    local ok, ret = pcall(function()
+        return remote:InvokeServer(_unpack(args))
+    end)
+    local success = isSuccessReturn(ok, ret)
+    local detail  = string.format("[%s%d] rot=%s ret=%s",
+        phaseTag, slotIdx, tostring(rotDeg), tostring(ret))
+
+    if success then
+        if phaseTag == "M" then
+            mainSatisfied[slotIdx] = true
+            stats.placed_m = stats.placed_m + 1
+            stats.ok_m     = stats.ok_m + 1
+        else
+            stats.placed_b = stats.placed_b + 1
+            stats.ok_b     = stats.ok_b + 1
+        end
+    else
+        if phaseTag == "M" then
+            stats.placed_m = stats.placed_m + 1
+            stats.fail_m   = stats.fail_m + 1
+        else
+            stats.placed_b = stats.placed_b + 1
+            stats.fail_b   = stats.fail_b + 1
+        end
+    end
+    lastResult = (success and "OK " or "FAIL ") .. detail
+    if CONFIG.VERBOSE then
+        if success then print("[AutoPlaceV13] " .. lastResult)
+        else            warn("[AutoPlaceV13] " .. lastResult) end
+    end
+    return success
+end
+
+-- ==========================================
+-- WAVE OBSERVER
+-- ==========================================
+local function detectRestartFromWave(prev, cur)
+    if not CONFIG.AUTO_RESET then return nil end
+    if prev <= 0 then return nil end
+    if CONFIG.DETECT_WAVE_DECREASE and cur < prev and prev >= 2 then
+        return string.format("wave decrease %d -> %d", prev, cur)
+    end
+    return nil
+end
+
+local function tryUnlockPlacement(source, info)
+    if placementUnlocked then return end
+    placementUnlocked = true
+    unlockSource = source .. (info and (" " .. info) or "")
+    print(string.format("[AutoPlaceV13] PLACEMENT UNLOCKED via %s", unlockSource))
+end
+
+local function processWaveSnapshot(num, rawText, kind)
+    if rawText then lastWaveTextRaw = rawText end
+
+    if kind == "COUNTDOWN" then
+        lastCountdownSeen = num
+        if CONFIG.UNLOCK_ON_COUNTDOWN then
+            tryUnlockPlacement("COUNTDOWN", "(" .. tostring(num) .. ")")
+        end
+        return
+    end
+
+    if kind == "INCOMING" then
+        if CONFIG.AUTO_RESET
+           and CONFIG.DETECT_INCOMING_AFTER_STOP
+           and maxWaveSeen >= CONFIG.STOP_WAVE then
+            print("[AutoPlaceV13] 'Enemies incoming!' setelah max wave -> RESTART")
+            pendingReset = true
+            return
+        end
+        if not enemiesIncomingSeen then
+            enemiesIncomingSeen = true
+            print("[AutoPlaceV13] 'Enemies incoming!' detected -> game tracked")
+        end
+        if CONFIG.UNLOCK_ON_INCOMING then
+            tryUnlockPlacement("INCOMING", nil)
+        end
+        return
+    end
+
+    if kind == "WAVE" and num then
+        if not enemiesIncomingSeen then
+            return
+        end
+        if num ~= lastWaveNum then
+            local prev = lastWaveNum
+            lastWaveNum = num
+            if num > maxWaveSeen then maxWaveSeen = num end
+
+            local restartReason = detectRestartFromWave(prev, num)
+            if restartReason then
+                print("[AutoPlaceV13] === RESTART DETECTED === " .. restartReason)
+                pendingReset = true
+                maxWaveSeen = num
+                return
+            end
+
+            if num == CONFIG.START_WAVE and not isRunning then
+                print("[AutoPlaceV13] Reach START_WAVE -> ON")
+                setScriptState(true)
+            elseif num == CONFIG.STOP_WAVE and isRunning then
+                print("[AutoPlaceV13] Reach STOP_WAVE -> OFF")
+                setScriptState(false)
+            end
+        end
+    end
+end
+
+-- BACKGROUND LOOPS
+task.spawn(function()
+    while true do
+        if CONFIG.WAVE_CONTROL then
+            local num, raw, kind = readWaveOnce()
+            processWaveSnapshot(num, raw, kind)
+        end
+        task.wait(0.15)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.4)
+        pcall(refreshUICounts)
+    end
+end)
+
+-- ==========================================
+-- MAIN ORCHESTRATOR
+-- ==========================================
+refreshStats()
+
+task.spawn(function()
+    setBanner("BOOT DELAY... " .. CONFIG.BOOT_DELAY .. "s",
+        Color3.fromRGB(255, 165, 0))
+    task.wait(CONFIG.BOOT_DELAY)
+
+    if CONFIG.WAVE_CONTROL and CONFIG.REQUIRE_PLACEMENT_GATE then
+        setBanner("DETECT countdown / incoming...", Color3.fromRGB(255, 200, 100))
+        local startT = os.clock()
+        while not placementUnlocked
+              and (os.clock() - startT) < CONFIG.WAVE_BOOT_TIMEOUT do
+            local num, raw, kind = readWaveOnce()
+            processWaveSnapshot(num, raw, kind)
+            refreshStats()
+            task.wait(0.1)
+        end
+        if not placementUnlocked then
+            warn(string.format(
+                "[AutoPlaceV13] Tidak ada countdown/incoming setelah %.1fs. " ..
+                "Placement tetap LOCK sampai signal muncul.",
+                CONFIG.WAVE_BOOT_TIMEOUT))
+        else
+            print("[AutoPlaceV13] Placement ready (unlocked via " .. unlockSource .. ")")
+        end
+    end
+
+    while true do
+        if pendingReset then
+            performReset("auto/manual")
+            setBanner("RESET cooldown...", Color3.fromRGB(255, 165, 0))
+            refreshStats()
+            task.wait(CONFIG.RESET_COOLDOWN)
+        end
+        pcall(refreshUICounts)
+
+        if os.clock() < pausedUntil then
+            task.wait(0.1)
+
+        elseif not isRunning then
+            currentPhase = "paused"
+            setBanner("PAUSED (Status: OFF)", Color3.fromRGB(180, 180, 180))
+            task.wait(0.3)
+
+        elseif capReached then
+            currentPhase = "cap-reached"
+            local cnt = CONFIG.CAP_COUNT_ONLY_TARGET and lastUITargetCount or lastUIAllUnits
+            setBanner(string.format("CAP REACHED: %d/%d", cnt, CONFIG.PlacementUnitMaxCap),
+                Color3.fromRGB(120, 220, 120))
+            refreshStats()
+            task.wait(1.0)
+
+        else
+            local canPlace, gateReason = canPlaceAnything()
+            if not canPlace then
+                currentPhase = "locked"
+                setBanner("LOCKED: " .. gateReason, Color3.fromRGB(255, 100, 100))
+                refreshStats()
+                task.wait(0.3)
+
+            elseif hasPendingPriority() then
+                currentPhase = "priority (AWAL)"
+                local target = nil
+                for i = 1, #SLOTS_PRIORITY do
+                    if not prioritySatisfied[i]
+                       and priorityAttempts[i] < CONFIG.PRIORITY_MAX_TRIES then
+                        target = i
+                        break
+                    end
+                end
+                if target then
+                    setBanner(string.format("PRIORITY %d/%d  (try %d)",
+                        target, #SLOTS_PRIORITY, priorityAttempts[target] + 1),
+                        Color3.fromRGB(255, 220, 100))
+                    pcall(placePrioritySlot, target)
+                    refreshStats()
+                    task.wait(CONFIG.PRIORITY_DELAY)
+                end
+
+            else
+                local canMain, reason = canStartMainPhase()
+                if not canMain then
+                    currentPhase = "waiting-gate"
+                    setBanner("WAIT: " .. reason, Color3.fromRGB(255, 200, 100))
+                    refreshStats()
+                    task.wait(0.4)
+                else
+                    if isBackupActive() then
+                        currentPhase = "main+backup"
+                        setBanner("MAIN + BACKUP", Color3.fromRGB(120, 180, 240))
+                    else
+                        currentPhase = "main"
+                        setBanner("MAIN PHASE", Color3.fromRGB(120, 220, 120))
+                    end
+                    local ok, err = pcall(placeMainOrBackupOnce)
+                    if not ok then
+                        warn("[AutoPlaceV13] Main loop error: " .. tostring(err))
+                        lastResult = "ERROR: " .. tostring(err)
+                    end
+                    refreshStats()
+                    local base  = CONFIG.LOOP_DELAY
+                    local jit   = CONFIG.LOOP_JITTER or 0
+                    local extra = (jit > 0) and randFloat(-jit, jit) or 0
+                    task.wait(math.max(0.01, base + extra))
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.4)
+        pcall(refreshStats)
+    end
+end)
+
+print(string.format(
+    "[AutoPlaceV13] Loaded OK. Unit=%s | Cap=%d | Priority=%d Main=%d | Gate>=%d | UnlockOn: countdown=%s incoming=%s",
+    CONFIG.TARGET_UNIT, CONFIG.PlacementUnitMaxCap,
+    #SLOTS_PRIORITY, #SLOTS_MAIN, CONFIG.MAIN_START_WAVE,
+    tostring(CONFIG.UNLOCK_ON_COUNTDOWN), tostring(CONFIG.UNLOCK_ON_INCOMING)
+))
