@@ -38,12 +38,12 @@ local CLICK_VERIFY_T      = 0.8               -- detik. Setelah klik Play Again,
 local RANDOMNESS_ENABLED  = true              -- true = aktifkan fitur random. false = ronde normal terus, TARGET_DIF dipakai semua.
 local RANDOMNESS_INTERVAL = 5                 -- jumlah gameplay. Misal 5 = tiap kelipatan 5 (game ke-5, 10, 15, ...) difficulty di-random. Isi 1 = setiap game random.
 local RANDOMNESS_POOL     = {                 -- List difficulty yang BOLEH dipakai saat ronde random. Edit sesuai selera.
-    "dif_easy",                               --   easy        | mode termudah
+    --"dif_easy",                               --   easy        | mode termudah
     "dif_normal",                             --   normal      | mode standar
     "dif_hard",                               --   hard        | mode susah
     "dif_insane",                             --   insane      | mode sangat susah
-    "dif_impossible",                         --   impossible  | mode super susah
-    "dif_apocalypse",                         --   apocalypse  | mode tersusah
+    --"dif_impossible",                         --   impossible  | mode super susah
+    --"dif_apocalypse",                         --   apocalypse  | mode tersusah
 }                                             -- Contoh kalau cuma mau random antara hard/insane: { "dif_hard", "dif_insane" }
 local RANDOMNESS_AVOID_REPEAT = false         -- true = hindari hasil random sama dengan ronde random sebelumnya (kalau pool >= 2). false = boleh sama berulang.
 
