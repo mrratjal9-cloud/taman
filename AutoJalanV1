@@ -1,0 +1,51 @@
+print("Jalan Bos")
+
+-- Teleport Anti AFK Jalan
+task.wait(10) -- Disarankan menggunakan task.wait() dibandingkan wait()
+print("Teleport")
+
+if game.PlaceId == 123516946198836 then
+    repeat task.wait() until game:IsLoaded()
+    repeat task.wait() until game:GetService("Players")
+    repeat task.wait() until game:GetService("Players").LocalPlayer
+    
+    -- Dapatkan karakter pemain
+    local player = game.Players.LocalPlayer
+    local character = player.Character or player.CharacterAdded:Wait()
+    
+    -- Pastikan karakter sudah sepenuhnya dimuat
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    local humanoid = character:WaitForChild("Humanoid")
+    
+    -- Tentukan beberapa titik tujuan (Hanya ambil X, Y, Z)
+    local positions = {
+        Vector3.new(-347.444489, 64.9051361, -117.292152, -0.638495445, -4.99462161e-08, -0.769625604, -1.72402714e-08, 1, -5.05939255e-08, 0.769625604, -1.90354381e-08, -0.638495445), -- Tujuan a
+        Vector3.new(-327.601501, 64.9051361, -128.047073, 0.067746304, 3.66980686e-08, -0.997702599, 2.35940742e-08, 1, 3.83846661e-08, 0.997702599, -2.61402882e-08, 0.067746304),   -- Tujuan b
+        Vector3.new(-311.567444, 64.9051437, -111.372292, -0.70041579, 3.0360745e-08, -0.713735044, -2.30119035e-10, 1, 4.27636628e-08, 0.713735044, 3.01165883e-08, -0.70041579), -- Tujuan 1
+        Vector3.new(-346.607574, 64.9051361, -103.882622, -0.0093932217, 1.06824317e-07, 0.999955893, -1.7449302e-09, 1, -1.06845427e-07, -0.999955893, -2.74847589e-09, -0.0093932217  ),   -- Tujuan 2
+        Vector3.new(-337.944611, 64.9551392, -113.710312, -0.174532324, -6.75317722e-08, -0.984651446, 2.69138329e-08, 1, -7.33550038e-08, 0.984651446, -3.93035648e-08, -0.174532324), -- Tujuan 3
+        Vector3.new(-334.731781, 64.9051361, -146.593262, 0.634802043, 8.28783442e-09, 0.772674799, 1.08234914e-08, 1, -1.96183549e-08, -0.772674799, 2.08168114e-08, 0.634802043)   -- Tujuan 4
+    }
+    
+    -- Fungsi untuk membuat karakter berjalan menuju titik tertentu
+    function walkToPosition(targetPosition)
+        -- Arahkan Humanoid untuk berjalan ke titik tujuan
+        humanoid:MoveTo(targetPosition)
+    
+        -- Tunggu sampai karakter sampai di titik tersebut
+        humanoid.MoveToFinished:Wait()
+    end
+    
+    -- Fungsi untuk berjalan ke semua tujuan
+    function walkToAllPositions(posList)
+        for _, position in ipairs(posList) do
+            walkToPosition(position)
+        end
+    end
+    
+    -- LOOPING TERUS MENERUS (ANTI AFK)
+    while true do
+        walkToAllPositions(positions)
+        task.wait(1) -- Beri jeda 1 detik sebelum mengulangi rute dari awal
+    end
+end
