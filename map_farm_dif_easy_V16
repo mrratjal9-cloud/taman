@@ -125,7 +125,7 @@ local CONFIG = {
     REQUIRE_CASH_GATE  = true,
     CASH_SAFETY_BUFFER = 0,
     UNIT_PRICES = {
-        ["unit_tomato_plant"] = 75,
+        ["unit_tomato_plant"] = 100,
     },
 
     -- ============= LOGGING =============
