@@ -1,33 +1,31 @@
 -- ==========================================
--- AUTO PLACE UNIT V16 (Pre-Game Unlock via "Choose level - X")
+-- AUTO PLACE UNIT V16 (Pre-Game Unlock via "Choose level - 1")
 -- ==========================================
--- Update dari V15:
+-- Revisi V16 (fix dari user):
 --
---   1) NEW UNLOCK SIGNAL: "Choose level - X" (DIFFICULTY VOTE)
---      Path: PlayerGui.GameGui.Screen.Middle.DifficultyVote.Items.Frame
---             .Actions.Items.Title
---      Format: "Choose level - 4" -> "Choose level - 3" -> ... -> "1"
---      Setelah X turun ke 1, gameplay mulai. Kita unlock placement DI SINI
---      jadi script sudah hammer placement BEFORE wave countdown 5,4,3,2,1.
---      Default: CHOOSE_LEVEL_UNLOCK_AT = 1 (unlock pas X=1, head-start ~1s).
---      Set ke 4 (atau lebih besar) supaya unlock paling awal (head-start ~4s).
+--   1) START HANYA SAAT "Choose level - 1"
+--      Game baru benar-benar mulai saat X=1. Sebelumnya script unlock
+--      lebih awal karena TIMER ada/jalan duluan saat masih X=7..2.
+--      Sekarang: unlock TIMER/COUNTDOWN/INCOMING di-GATE oleh
+--      UNLOCK_REQUIRES_CHOOSE_LEVEL_DONE. Hanya boleh unlock kalau:
+--         - source == CHOOSE_LEVEL (X<=1) , ATAU
+--         - chooseLevelDone() sudah tercapai (vote sudah turun ke 1)
+--      Kalau script join mid-game (vote tidak pernah muncul) dan
+--      bootCompleted, fallback timer/countdown/incoming masih boleh.
 --
---   2) TIMER LEBIH LENIENT
---      Berdasar info user: setelah reset, timer ke 59:59 lalu ke 0. Jadi
---      timer max bukan 60:00. Threshold diturunkan ke 1 detik (TIMER_UNLOCK_THRESHOLD = 1).
---      Tambahan: TIMER FIRST-SEEN UNLOCK -- begitu timer pertama kali ke-baca
---      (apapun nilainya), unlock placement (interpretasi: kalau timer sudah
---      muncul, artinya kita sudah dalam game).
+--   2) TIMER WIDGET FIX
+--      TopbarStandard.Holders.Right punya BANYAK Widget. Kita iterasi
+--      semua Widget dan ambil yang text-nya match MM:SS (mis. "1:59").
+--      Path-display di GUI dihilangkan (TimerSrcLbl dihapus).
 --
---   3) URUTAN UNLOCK signal (mana duluan menang):
---      a) CHOOSE_LEVEL  (paling awal, sebelum gameplay)
---      b) TIMER         (timer pertama ke-baca = sudah dalam game)
---      c) COUNTDOWN     (5,4,3,2,1 sebelum wave 1)
---      d) INCOMING      ('Enemies incoming!')
+--   3) CONFIG dirapikan per kategori, komentar Indonesia di kanan.
 --
---   4) RESET DETECTION via DifficultyVote
---      Kalau "Choose level - X" muncul lagi setelah game pernah jalan,
---      itu artinya game baru. Trigger pendingReset.
+--   4) PRIORITY STUCK FIX
+--      Kadang priority slot SUDAH tertempati (UI: 2/20) tapi
+--      prioritySatisfied tidak ter-set (verify UI lag, dll).
+--      Tambah reconcilePriorityFromUI: kalau lastUITargetCount >=
+--      #SLOTS_PRIORITY, semua priority otomatis di-mark satisfied,
+--      script langsung lanjut ke MAIN.
 -- ==========================================
 
 print("[AutoPlaceV16] Boot: starting...")
@@ -37,104 +35,105 @@ math.randomseed(tick() * 1000 % 2147483647)
 for i = 1, 8 do math.random() end
 
 -- ==========================================
--- CONFIGURATION
+-- CONFIGURATION  (rapi per kategori, komentar di kanan)
 -- ==========================================
 local CONFIG = {
 
-    -- ============= CORE =============
-    AUTO_START   = true,
-    TARGET_UNIT  = "unit_tomato_plant",
+    -- =========== [1] CORE (script utama) ===========
+    AUTO_START   = true,                    -- true = script langsung jalan saat di-load
+    TARGET_UNIT  = "unit_tomato_plant",     -- nama unit yang dipasang (sesuai server)
 
-    -- ============= TIMING =============
-    BOOT_DELAY     = 0.0,
-    LOOP_DELAY     = 0.05,
-    LOOP_JITTER    = 0.02,
-    WAVE_POLL      = 0.05,
-    TIMER_POLL     = 0.05,
-    VOTE_POLL      = 0.05,
-    UI_POLL        = 0.25,
-    MIN_YIELD      = 0.0,
+    -- =========== [2] TIMING (delay & polling) ===========
+    BOOT_DELAY     = 0.0,    -- delay sebelum script mulai (detik). 0 = instan.
+    LOOP_DELAY     = 0.05,   -- delay antar placement di main loop (detik)
+    LOOP_JITTER    = 0.02,   -- variasi acak ± pada LOOP_DELAY (anti-macro)
+    WAVE_POLL      = 0.05,   -- interval baca wave/countdown (detik)
+    TIMER_POLL     = 0.05,   -- interval baca timer top-bar (detik)
+    VOTE_POLL      = 0.05,   -- interval baca DifficultyVote (detik)
+    UI_POLL        = 0.25,   -- interval refresh UI counter (detik)
+    MIN_YIELD      = 0.0,    -- minimum yield dalam loop (0 = task.wait() default)
 
-    -- ============= PRIORITY =============
-    PRIORITY_LOCK         = true,
-    PRIORITY_DELAY        = 0.10,
-    PRIORITY_FAIL_DELAY   = 0.15,
-    PRIORITY_MAX_TRIES    = 99999,
-    PRIORITY_VERIFY_UI    = true,
-    PRIORITY_VERIFY_WAIT  = 0.10,
-    PRIORITY_BYPASS_CASH  = true,
+    -- =========== [3] PRIORITY (slot prioritas wajib di awal) ===========
+    PRIORITY_LOCK         = true,   -- true = main hanya jalan setelah priority semua selesai
+    PRIORITY_DELAY        = 0.10,   -- delay setelah priority sukses (detik)
+    PRIORITY_FAIL_DELAY   = 0.15,   -- delay setelah priority gagal (detik)
+    PRIORITY_MAX_TRIES    = 99999,  -- maks retry per slot priority (99999 = praktis tak terbatas)
+    PRIORITY_VERIFY_UI    = true,   -- true = verifikasi via UI counter sebelum mark satisfied
+    PRIORITY_VERIFY_WAIT  = 0.10,   -- tunggu UI update sebelum verify (detik)
+    PRIORITY_BYPASS_CASH  = true,   -- true = priority skip cash gate (server tetap bisa reject)
+    PRIORITY_RECONCILE_UI = true,   -- (V16 NEW) true = bila UI count >= #priority, mark semua satisfied
 
-    -- ============= INSTANT BURST =============
-    FAST_PLACE_FIRST_N     = 8,
-    FAST_PLACE_DELAY       = 0.00,
-    FAST_PLACE_SKIP_VERIFY = true,
+    -- =========== [4] INSTANT BURST (placement super cepat di awal) ===========
+    FAST_PLACE_FIRST_N     = 8,     -- N placement pertama dijalankan tanpa jeda
+    FAST_PLACE_DELAY       = 0.00,  -- delay saat burst (0 = secepat mungkin)
+    FAST_PLACE_SKIP_VERIFY = true,  -- true = saat burst, lewati verifikasi UI
 
-    -- ============= PLACEMENT GATE =============
-    REQUIRE_PLACEMENT_GATE    = true,
+    -- =========== [5] PLACEMENT GATE (kapan boleh mulai place) ===========
+    REQUIRE_PLACEMENT_GATE     = true,  -- true = wajib lewati gate sebelum placement
 
-    -- (V16 baru) Pre-game unlock dari "Choose level - X"
-    UNLOCK_ON_CHOOSE_LEVEL    = true,
-    -- Unlock pas X <= angka ini. Default 1 (paling akhir, jadinya
-    -- unlock tepat sebelum gameplay). Set 4 untuk unlock paling awal.
-    CHOOSE_LEVEL_UNLOCK_AT    = 1,
-    -- Set true: unlock pas SIGNAL CHOOSE_LEVEL pertama ke-detect (apapun X-nya)
-    UNLOCK_ON_CHOOSE_LEVEL_ANY = false,
+    -- Sumber unlock CHOOSE_LEVEL (DifficultyVote: "Choose level - X"):
+    UNLOCK_ON_CHOOSE_LEVEL     = true,  -- true = aktifkan unlock dari DifficultyVote
+    CHOOSE_LEVEL_UNLOCK_AT     = 1,     -- unlock saat X <= angka ini (1 = persis sebelum game start)
+    UNLOCK_ON_CHOOSE_LEVEL_ANY = false, -- true = unlock kapan saja vote terdeteksi (X berapa pun, NOT REKOMENDASI)
 
-    UNLOCK_ON_TIMER           = true,
-    UNLOCK_ON_TIMER_FIRST     = true,   -- (V16) timer pertama ke-baca = unlock
-    UNLOCK_ON_COUNTDOWN       = true,
-    UNLOCK_ON_INCOMING        = true,
+    -- (V16 NEW) Master gate: timer/countdown/incoming HANYA valid setelah ChooseLevel<=UNLOCK_AT
+    -- Bila vote tidak pernah muncul (mid-game join), boot expired -> fallback diizinkan.
+    UNLOCK_REQUIRES_CHOOSE_LEVEL_DONE = true,
 
-    COUNTDOWN_MIN             = 1,
-    COUNTDOWN_MAX             = 10,
-    -- (V16) diturunkan: dulu 59:50; sekarang cukup 1 detik.
-    TIMER_UNLOCK_THRESHOLD    = 1,
-    TIMER_RESET_JUMP          = 60,
-    MAIN_START_WAVE           = 2,
-    MAIN_REQUIRES_PRIORITY_OK = true,
+    UNLOCK_ON_TIMER       = false, -- (V16 default false) timer pernah muncul saat masih voting → spam!
+    UNLOCK_ON_TIMER_FIRST = false, -- (V16 default false) idem -- timer first read tidak diandalkan
+    UNLOCK_ON_COUNTDOWN   = true,  -- true = unlock saat melihat countdown 5,4,3,2,1 (sebelum wave 1)
+    UNLOCK_ON_INCOMING    = true,  -- true = unlock saat 'Enemies incoming!' terbaca
 
-    -- ============= WAVE CONTROL =============
-    WAVE_CONTROL      = true,
-    START_WAVE        = 1,
-    STOP_WAVE         = 11,
-    WAVE_BOOT_TIMEOUT = 30.0,   -- naikin biar bisa nunggu DifficultyVote
+    COUNTDOWN_MIN          = 1,    -- range minimum angka countdown (untuk filter false-positive)
+    COUNTDOWN_MAX          = 10,   -- range maksimum angka countdown
+    TIMER_UNLOCK_THRESHOLD = 1,    -- (kalau UNLOCK_ON_TIMER aktif) detik minimum timer untuk unlock
+    TIMER_RESET_JUMP       = 60,   -- lonjakan detik untuk deteksi reset (curr - prev)
+    MAIN_START_WAVE           = 2,    -- wave minimum untuk mulai MAIN placement
+    MAIN_REQUIRES_PRIORITY_OK = true, -- true = MAIN hanya jalan kalau priority sudah satisfied
 
-    -- ============= AUTO-RESTART =============
-    AUTO_RESET                  = true,
-    DETECT_WAVE_DECREASE        = true,
-    DETECT_INCOMING_AFTER_STOP  = true,
-    DETECT_TIMER_RESET          = true,
-    DETECT_VOTE_REAPPEAR        = true,   -- (V16)
-    RESET_COOLDOWN              = 1.5,
+    -- =========== [6] WAVE CONTROL (auto ON/OFF berdasarkan wave) ===========
+    WAVE_CONTROL      = true,    -- true = aktifkan logic wave-based ON/OFF
+    START_WAVE        = 1,       -- wave saat status auto-ON
+    STOP_WAVE         = 11,      -- wave saat status auto-OFF
+    WAVE_BOOT_TIMEOUT = 30.0,    -- maks tunggu sinyal unlock saat boot (detik)
 
-    -- ============= CAP =============
-    PlacementUnitMaxCap   = 20,
-    CAP_COUNT_ONLY_TARGET = true,
+    -- =========== [7] AUTO-RESTART (deteksi game baru / reset) ===========
+    AUTO_RESET                  = true,  -- true = aktifkan auto-reset state antar game
+    DETECT_WAVE_DECREASE        = true,  -- reset bila wave turun (mis. 5 -> 1)
+    DETECT_INCOMING_AFTER_STOP  = true,  -- reset bila 'Enemies incoming' setelah STOP_WAVE
+    DETECT_TIMER_RESET          = true,  -- reset bila timer melonjak naik
+    DETECT_VOTE_REAPPEAR        = true,  -- reset bila DifficultyVote muncul lagi di tengah game
+    RESET_COOLDOWN              = 1.5,   -- cooldown setelah reset (detik)
 
-    -- ============= ANTI-MACRO =============
-    POSITION_OFFSET = 0.05,
-    ROTATION_MODE   = "step90",
-    FIXED_ROT_DEG   = 0,
+    -- =========== [8] CAP (batas jumlah unit) ===========
+    PlacementUnitMaxCap   = 20,    -- maks total unit yang dipasang sebelum berhenti
+    CAP_COUNT_ONLY_TARGET = true,  -- true = cap hanya hitung TARGET_UNIT, false = semua unit
 
-    -- ============= BACKUP =============
-    USE_BACKUP        = true,
-    BACKUP_AFTER_WAVE = 5,
-    BACKUP_CHANCE     = 0.5,
+    -- =========== [9] ANTI-MACRO (variasi anti-deteksi pola robotik) ===========
+    POSITION_OFFSET = 0.05,        -- offset acak posisi (stud) ± nilai ini
+    ROTATION_MODE   = "step90",    -- "step90" / "smooth" / "fixed" / "off"
+    FIXED_ROT_DEG   = 0,           -- derajat rotasi saat ROTATION_MODE = "fixed"
 
-    -- ============= CASH GATE (untuk MAIN/BACKUP saja) =============
-    REQUIRE_CASH_GATE  = true,
-    CASH_SAFETY_BUFFER = 0,
-    UNIT_PRICES = {
+    -- =========== [10] BACKUP (slot tambahan setelah wave tertentu) ===========
+    USE_BACKUP        = true,    -- true = aktifkan slot backup
+    BACKUP_AFTER_WAVE = 5,       -- backup mulai aktif dari wave ini ke atas
+    BACKUP_CHANCE     = 0.5,     -- probabilitas pilih backup vs main (0.0-1.0)
+
+    -- =========== [11] CASH GATE (untuk MAIN/BACKUP saja, priority bypass) ===========
+    REQUIRE_CASH_GATE  = true,   -- true = wajib cash cukup sebelum MAIN/BACKUP placement
+    CASH_SAFETY_BUFFER = 0,      -- buffer cash ekstra (jaga-jaga, biasanya 0)
+    UNIT_PRICES = {              -- harga per unit untuk cash gate
         ["unit_tomato_plant"] = 100,
     },
 
-    -- ============= LOGGING =============
-    VERBOSE       = false,
-    LOUD_PRIORITY = true,
-    DEBUG_GATE    = false,
-    DEBUG_TIMER   = false,
-    DEBUG_VOTE    = true,    -- nyalakan biar gampang ngecek "Choose level"
-    DEBUG_CASH    = false,
+    -- =========== [12] LOGGING (debug & verbose) ===========
+    VERBOSE       = false,   -- log umum (jangan diaktifkan saat normal play)
+    LOUD_PRIORITY = true,    -- true = log per-attempt priority placement
+    DEBUG_GATE    = false,   -- log aktivitas gate (placement gate, dll)
+    DEBUG_TIMER   = false,   -- log pembacaan timer setiap ~1 detik
+    DEBUG_VOTE    = true,    -- log pembacaan DifficultyVote (rekomendasi tetap on saat awal)
+    DEBUG_CASH    = false,   -- log pembacaan cash
 }
 
 -- ==========================================
@@ -224,6 +223,8 @@ local lastCash             = -1
 local lastCashRaw          = "-"
 -- Burst state
 local placementsSinceUnlock = 0
+-- (V16) Boot phase tracker: setelah WAVE_BOOT_TIMEOUT, fallback unlock diizinkan untuk mid-game join
+local bootCompleted        = false
 
 -- HELPERS
 local function randFloat(a, b) return a + (b - a) * math.random() end
@@ -308,23 +309,53 @@ local function parseMMSS(t)
     return mm * 60 + ss
 end
 
+-- (V16 FIX) Holders.Right punya BANYAK Widget. Kita scan SEMUA child dan
+-- pilih widget yang IconLabel-nya match MM:SS (mis. "1:59"). Yang ada
+-- prefix '⏱️' diberi prioritas.
 local function tryDirectTimerPath(pGui)
     local tbs  = pGui  and pGui:FindFirstChild("TopbarStandard")
     local hold = tbs   and tbs:FindFirstChild("Holders")
     local rgt  = hold  and hold:FindFirstChild("Right")
-    local wid  = rgt   and rgt:FindFirstChild("Widget")
-    local ib   = wid   and wid:FindFirstChild("IconButton")
-    local menu = ib    and ib:FindFirstChild("Menu")
-    local spot = menu  and menu:FindFirstChild("IconSpot")
-    local cnt  = spot  and spot:FindFirstChild("Contents")
-    local cont = cnt   and cnt:FindFirstChild("IconLabelContainer")
-    local lbl  = cont  and cont:FindFirstChild("IconLabel")
-    if lbl and lbl.Text and lbl.Text ~= "" then
-        local sec = parseMMSS(lbl.Text)
-        if sec then return sec, lbl.Text, "DIRECT" end
-        return nil, lbl.Text, "DIRECT(no-mm:ss)"
+    if not rgt then return nil, nil, "DIRECT(no-holder-right)" end
+
+    local bestSec, bestText, bestName, bestScore = nil, nil, nil, -1
+    local children = rgt:GetChildren()
+    for _, widget in ipairs(children) do
+        local ib   = widget:FindFirstChild("IconButton")
+        local menu = ib    and ib:FindFirstChild("Menu")
+        local spot = menu  and menu:FindFirstChild("IconSpot")
+        local cnt  = spot  and spot:FindFirstChild("Contents")
+        local cont = cnt   and cnt:FindFirstChild("IconLabelContainer")
+        local lbl  = cont  and cont:FindFirstChild("IconLabel")
+        if lbl and lbl.Text and lbl.Text ~= "" then
+            local sec = parseMMSS(lbl.Text)
+            if sec then
+                local score = 1
+                -- prioritas: text yang ada emoji jam ⏱️
+                if string.find(lbl.Text, "⏱", 1, true) then
+                    score = score + 5
+                end
+                -- bonus kalau widget name terlihat seperti game timer
+                local lname = string.lower(widget.Name or "")
+                if string.find(lname, "time", 1, true)
+                   or string.find(lname, "timer", 1, true)
+                   or string.find(lname, "wave", 1, true) then
+                    score = score + 2
+                end
+                if score > bestScore then
+                    bestSec   = sec
+                    bestText  = lbl.Text
+                    bestName  = widget.Name
+                    bestScore = score
+                end
+            end
+        end
     end
-    return nil, nil, "DIRECT(missing)"
+
+    if bestSec then
+        return bestSec, bestText, "WIDGET:" .. tostring(bestName)
+    end
+    return nil, nil, "DIRECT(no-mm:ss)"
 end
 
 local function findTimerLabel(root, depth)
@@ -531,6 +562,33 @@ end
 local function checkCapBeforePlacement()
     refreshUICounts()
     return capReached
+end
+
+-- ==========================================
+-- (V16 FIX #4) RECONCILE PRIORITY FROM UI
+-- Kalau UI sudah baca jumlah unit terpasang >= jumlah priority slot,
+-- mark SEMUA priority sebagai satisfied. Ini menyelesaikan kasus
+-- "stuck di priority" karena verify lag / ret unexpected setelah
+-- placement priority sebenarnya sudah berhasil server-side.
+-- ==========================================
+local function reconcilePriorityFromUI()
+    if not CONFIG.PRIORITY_RECONCILE_UI then return end
+    if not CONFIG.PRIORITY_LOCK then return end
+    if #SLOTS_PRIORITY == 0 then return end
+    if lastUITargetCount < #SLOTS_PRIORITY then return end
+
+    local changed = false
+    for i = 1, #SLOTS_PRIORITY do
+        if not prioritySatisfied[i] then
+            prioritySatisfied[i] = true
+            changed = true
+        end
+    end
+    if changed and CONFIG.LOUD_PRIORITY then
+        print(string.format(
+            "[AutoPlaceV16] reconcilePriority: UI=%d >= P=%d, semua priority dimark satisfied",
+            lastUITargetCount, #SLOTS_PRIORITY))
+    end
 end
 
 -- ==========================================
@@ -820,20 +878,11 @@ TimerLbl.TextSize = 11
 TimerLbl.TextXAlignment = Enum.TextXAlignment.Left
 TimerLbl.Parent = ContentFrame
 
-local TimerSrcLbl = Instance.new("TextLabel")
-TimerSrcLbl.Size = UDim2.new(1, -20, 0, 14)
-TimerSrcLbl.Position = UDim2.new(0, 10, 0, 228)
-TimerSrcLbl.BackgroundTransparency = 1
-TimerSrcLbl.Text = "TimerSrc: -"
-TimerSrcLbl.TextColor3 = Color3.fromRGB(180, 200, 230)
-TimerSrcLbl.Font = Enum.Font.Gotham
-TimerSrcLbl.TextSize = 10
-TimerSrcLbl.TextXAlignment = Enum.TextXAlignment.Left
-TimerSrcLbl.Parent = ContentFrame
+-- (V16) TimerSrcLbl dihapus dari GUI -- path widget tidak ditampilkan lagi.
 
 local CashLbl = Instance.new("TextLabel")
 CashLbl.Size = UDim2.new(1, -20, 0, 14)
-CashLbl.Position = UDim2.new(0, 10, 0, 244)
+CashLbl.Position = UDim2.new(0, 10, 0, 228)
 CashLbl.BackgroundTransparency = 1
 CashLbl.Text = "Cash: -"
 CashLbl.TextColor3 = Color3.fromRGB(140, 230, 140)
@@ -844,7 +893,7 @@ CashLbl.Parent = ContentFrame
 
 local WaveRawLbl = Instance.new("TextLabel")
 WaveRawLbl.Size = UDim2.new(1, -20, 0, 14)
-WaveRawLbl.Position = UDim2.new(0, 10, 0, 260)
+WaveRawLbl.Position = UDim2.new(0, 10, 0, 244)
 WaveRawLbl.BackgroundTransparency = 1
 WaveRawLbl.Text = "WaveTxt: -"
 WaveRawLbl.TextColor3 = Color3.fromRGB(150, 170, 200)
@@ -855,7 +904,7 @@ WaveRawLbl.Parent = ContentFrame
 
 local GameLbl = Instance.new("TextLabel")
 GameLbl.Size = UDim2.new(1, -20, 0, 14)
-GameLbl.Position = UDim2.new(0, 10, 0, 276)
+GameLbl.Position = UDim2.new(0, 10, 0, 260)
 GameLbl.BackgroundTransparency = 1
 GameLbl.Text = "Game #1  |  Last reset: -"
 GameLbl.TextColor3 = Color3.fromRGB(220, 180, 220)
@@ -866,7 +915,7 @@ GameLbl.Parent = ContentFrame
 
 local StatusLbl = Instance.new("TextLabel")
 StatusLbl.Size = UDim2.new(1, -20, 0, 130)
-StatusLbl.Position = UDim2.new(0, 10, 0, 294)
+StatusLbl.Position = UDim2.new(0, 10, 0, 278)
 StatusLbl.BackgroundTransparency = 1
 StatusLbl.Text = "Last: -"
 StatusLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
@@ -964,7 +1013,7 @@ local function refreshStats()
         fmtTimer(lastTimerSec),
         fmtTimer(CONFIG.TIMER_UNLOCK_THRESHOLD),
         tostring(lastTimerRaw))
-    TimerSrcLbl.Text = "TimerSrc: " .. tostring(lastTimerSrc)
+    -- (V16) TimerSrcLbl dihapus dari GUI
 
     local price = getUnitPrice(CONFIG.TARGET_UNIT)
     if CONFIG.REQUIRE_CASH_GATE and price > 0 then
@@ -1265,8 +1314,36 @@ local function detectRestartFromWave(prev, cur)
     return nil
 end
 
+-- (V16) chooseLevel sudah benar-benar mencapai threshold start (X<=1)?
+local function chooseLevelDone()
+    return chooseLevelSeen
+       and lastChooseLevel >= 0
+       and lastChooseLevel <= (CONFIG.CHOOSE_LEVEL_UNLOCK_AT or 1)
+end
+
 local function tryUnlockPlacement(source, info)
     if placementUnlocked then return end
+
+    -- (V16 FIX #1) Gate keras: kecuali source CHOOSE_LEVEL itu sendiri,
+    -- semua sumber (TIMER/COUNTDOWN/INCOMING) hanya boleh unlock kalau:
+    --   - vote sudah turun ke X<=UNLOCK_AT, ATAU
+    --   - vote tidak pernah muncul DAN boot sudah expired (mid-game join)
+    if CONFIG.UNLOCK_REQUIRES_CHOOSE_LEVEL_DONE and source ~= "CHOOSE_LEVEL" then
+        if chooseLevelDone() then
+            -- ok: vote selesai countdown
+        elseif (not chooseLevelSeen) and bootCompleted then
+            -- ok: tidak pernah ada vote dan boot expired -> mid-game join, fallback diizinkan
+        else
+            if CONFIG.DEBUG_GATE then
+                print(string.format(
+                    "[AutoPlaceV16] unlock(%s) DIBLOK: tunggu CHOOSE_LEVEL<=%d (sekarang X=%s, seen=%s)",
+                    source, CONFIG.CHOOSE_LEVEL_UNLOCK_AT or 1,
+                    tostring(lastChooseLevel), tostring(chooseLevelSeen)))
+            end
+            return
+        end
+    end
+
     placementUnlocked     = true
     placementsSinceUnlock = 0
     unlockSource = source .. (info and (" " .. info) or "")
@@ -1481,6 +1558,9 @@ task.spawn(function()
         else
             print("[AutoPlaceV16] Placement ready (unlocked via " .. unlockSource .. ")")
         end
+        -- (V16) Tandai boot phase selesai. Setelah ini, bila vote tidak pernah
+        -- muncul, fallback timer/countdown/incoming diizinkan (mid-game join).
+        bootCompleted = true
     end
 
     while true do
@@ -1491,6 +1571,8 @@ task.spawn(function()
             task.wait(CONFIG.RESET_COOLDOWN)
         end
         pcall(refreshUICounts)
+        -- (V16 FIX #4) reconcile priority dari UI sebelum loop kerja
+        pcall(reconcilePriorityFromUI)
 
         if os.clock() < pausedUntil then
             task.wait(0.05)
@@ -1593,14 +1675,16 @@ end)
 
 print(string.format(
     "[AutoPlaceV16] Loaded OK. Unit=%s | Cap=%d | P=%d M=%d | " ..
-    "Gate>=%d | UnlockOn: vote@<=%d timer-first=%s timer>=%s countdown=%s incoming=%s | " ..
-    "CashGate(main only)=%s",
+    "Gate>=%d | UnlockOn: vote@<=%d (require_done=%s) timer-first=%s timer>=%s countdown=%s incoming=%s | " ..
+    "CashGate(main only)=%s | PriorityReconcileUI=%s",
     CONFIG.TARGET_UNIT, CONFIG.PlacementUnitMaxCap,
     #SLOTS_PRIORITY, #SLOTS_MAIN, CONFIG.MAIN_START_WAVE,
     CONFIG.CHOOSE_LEVEL_UNLOCK_AT or 1,
+    tostring(CONFIG.UNLOCK_REQUIRES_CHOOSE_LEVEL_DONE),
     tostring(CONFIG.UNLOCK_ON_TIMER_FIRST),
     fmtTimer(CONFIG.TIMER_UNLOCK_THRESHOLD),
     tostring(CONFIG.UNLOCK_ON_COUNTDOWN),
     tostring(CONFIG.UNLOCK_ON_INCOMING),
-    tostring(CONFIG.REQUIRE_CASH_GATE)
+    tostring(CONFIG.REQUIRE_CASH_GATE),
+    tostring(CONFIG.PRIORITY_RECONCILE_UI)
 ))
