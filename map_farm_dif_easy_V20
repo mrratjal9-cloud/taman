@@ -232,7 +232,7 @@ local CONFIG = {
     -- ===========================================================
     -- [13] LOGGING  (debug & verbose - matikan saat play normal)
     -- ===========================================================
-    VERBOSE       = true,    -- [LOG] guna: log umum. | nilai: true/false. | efek: true = banyak info di console (F9), false = senyap.
+    VERBOSE       = false,    -- [LOG] guna: log umum. | nilai: true/false. | efek: true = banyak info di console (F9), false = senyap.
     LOUD_PRIORITY = true,    -- [LOG] guna: log per-attempt priority placement. | nilai: true/false. | efek: berguna saat debug priority, biasanya off saat normal play.
     DEBUG_GATE    = false,   -- [LOG] guna: log aktivitas gate (placement gate, dll). | nilai: true/false. | efek: aktifkan kalau curiga gate salah block.
     DEBUG_TIMER   = false,   -- [LOG] guna: log pembacaan timer setiap ~1 detik. | nilai: true/false. | efek: aktifkan kalau curiga timer salah baca.
