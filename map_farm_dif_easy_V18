@@ -187,7 +187,7 @@ local CONFIG = {
     -- ===========================================================
     -- [13] LOGGING  (debug & verbose - matikan saat play normal)
     -- ===========================================================
-    VERBOSE       = false,   -- log umum (jangan aktifkan saat normal play, banyak spam)
+    VERBOSE       = true,   -- log umum (jangan aktifkan saat normal play, banyak spam)
     LOUD_PRIORITY = true,    -- true = log per-attempt priority placement (berguna saat debug priority)
     DEBUG_GATE    = false,   -- log aktivitas gate (placement gate, dll)
     DEBUG_TIMER   = false,   -- log pembacaan timer setiap ~1 detik (aktifkan kalau curiga timer salah baca)
