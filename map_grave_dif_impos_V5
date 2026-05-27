@@ -193,7 +193,7 @@ local CONFIG = {
     -- ===========================================================
     WAVE_CONTROL = true,    -- [WAVE] guna: aktifkan logic wave-based ON/OFF. | nilai: true/false. | efek: true = script auto-pause saat lewat STOP_WAVE.
     START_WAVE   = 2,       -- [WAVE] guna: wave saat status auto-ON. | nilai: 1-3. | efek: biasanya 1.
-    STOP_WAVE    = 9,      -- [WAVE] guna: wave saat status auto-OFF. | nilai: tergantung map. | efek: setelah wave ini = pause + tunggu reset.
+    STOP_WAVE    = 8,       -- [WAVE] guna: wave saat status auto-OFF. | nilai: tergantung map. | efek: setelah wave ini = pause + tunggu reset.
 
     -- ===========================================================
     -- [8] AUTO-RESTART  (deteksi game baru / round reset)
