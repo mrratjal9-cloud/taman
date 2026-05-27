@@ -18,7 +18,7 @@ local CONFIG = {
 
     -- ====== [A] PENGATURAN UPGRADE ======
     AutoStart       = true,                     -- true = script otomatis berjalan saat di-load (belum dipakai sekarang, manual via tombol)
-    UpgradeInterval = 0.5,                      -- Jeda antar upgrade dalam detik (semakin kecil = semakin cepat, tapi boros)
+    UpgradeInterval = 0.01,                      -- Jeda antar upgrade dalam detik (semakin kecil = semakin cepat, tapi boros)
     MaxLevel        = 2,                        -- Level MAX unit; kalau unit sudah di level ini, dia di-skip (hemat coin)
 
     -- ====== [B] PENGATURAN TARGET UNIT ======
