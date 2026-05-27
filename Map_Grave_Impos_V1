@@ -30,7 +30,7 @@ local scriptsByPlaceId = {
         --"https://github.com/mrratjal9-cloud/taman/raw/refs/heads/main/ANTI_AFK", --Begini juga bisa
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoUpgrade_map_grave_dif_impos_V1",--upgrade
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/map_grave_dif_impos_V5",--place unit
-        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoReplayV5",-- restart
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoReplay_Map_Grave_V1",-- restart
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/ANTI_AFK",
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AntiDC_V1"
     },
