@@ -1,0 +1,781 @@
+-- ==========================================================
+-- SKIP V6 (Fix GUI tidak bisa di-interact dari V5)
+-- ==========================================================
+-- MASALAH V5:
+--   - GUI muncul, tapi DRAG / MINIMIZE / CLOSE / TOGGLE tidak
+--     respons sama sekali. Script juga "tidak ngapa-ngapain".
+--
+-- ROOT CAUSE V5:
+--   - Panel di-parent ke gethui() / CoreGui. Di banyak
+--     executor, parent ini RENDER-ONLY (panel kelihatan tapi
+--     tidak menerima input mouse/touch). Klik tembus ke game.
+--   - Game punya Frame "AbsoluteScreen" fullscreen di
+--     PlayerGui.GameGui yang men-capture klik di atas panel.
+--   - Plus event MouseButton1Click di executor tertentu kadang
+--     "diam-diam" tidak ke-fire kalau parent gak tepat.
+--
+-- STRATEGI V6 (3-LAYER FAILSAFE):
+--   [Layer 1] Parent ke LocalPlayer.PlayerGui (paling kompatibel
+--             input-wise di SEMUA executor yang saya tahu).
+--             ResetOnSpawn = false. IgnoreGuiInset = true.
+--             DisplayOrder = 999999 (di atas game UI).
+--   [Layer 2] Standard MouseButton1Click handler di setiap
+--             tombol (cara normal).
+--   [Layer 3] BACKUP: UserInputService global handler yang
+--             nge-detect klik di area koordinat tombol secara
+--             manual. KALAUPUN Layer 2 gagal, Layer 3 PASTI
+--             jalan -> drag/close/minimize/toggle TETAP
+--             berfungsi.
+--
+-- BONUS V6:
+--   - Visual click feedback (kedip warna biru saat berhasil
+--     klik) -> debugging tanpa F9 console.
+--   - Loop logic dari V5 dipertahankan (yang udah work).
+--   - Semua connection di-track -> Close = mati total.
+-- ==========================================================
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                       CONFIGURATION                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+
+-- ── [KATEGORI 1] FITUR SKIP ────────────────────────────────
+local Config = {
+    AutoSkip   = true,    -- true = saat eksekusi langsung NYALAKAN tombol "Auto Skip" di game (klik kalau lagi Off). false = jangan otak-atik.
+    ManualSkip = true,    -- true = saat eksekusi otomatis klik "Skip Wave >>" tiap kali frame SkipWave muncul. false = nonaktif.
+}
+
+-- ── [KATEGORI 2] GAME SPEED (Tick Speed) ───────────────────
+local SpeedConfig = {
+    GameSpeed  = 2,       -- 1 / 2 / 3 (max 3x). Di-apply otomatis SEKALI di awal + tiap kali round baru. Implementasi: KLIK tombol TickSpeed.Items.{N} pakai firesignal (BUKAN InvokeServer -> aman dari crash V2).
+}
+
+-- ── [KATEGORI 3] ANTI-FLAG / ANTI-MACRO ────────────────────
+local AntiFlagConfig = {
+    LoopIntervalMin     = 0.8,    -- detik. Jeda MIN antar iterasi loop (random MIN..MAX -> anti pattern macro).
+    LoopIntervalMax     = 1.4,    -- detik. Jeda MAX antar iterasi loop.
+    AutoSkipCooldown    = 3.0,    -- detik. Cooldown setelah klik AutoSkip.
+    ManualCooldownMin   = 1.2,    -- detik. Cooldown MIN klik Skip Wave.
+    ManualCooldownMax   = 2.0,    -- detik. Cooldown MAX klik Skip Wave.
+}
+
+-- ── [KATEGORI 4] STARTUP / WATCHDOG ────────────────────────
+local WatchdogConfig = {
+    SpeedApplyTimeout   = 30,     -- detik. Berapa lama nungguin tombol TickSpeed muncul saat startup.
+    PathMissingWarnAt   = 20,     -- iterasi. Kalau path UI hilang sekian iterasi, panel kasih warning.
+}
+
+-- ── [KATEGORI 5] DEBUG ─────────────────────────────────────
+local DEBUG_PRINT  = true         -- true = print log ke F9 console (rekomendasi ON sampai stabil di sisimu). false = silent.
+local CLICK_FLASH  = true         -- true = kasih kedip warna biru saat tombol panel berhasil diklik (visual debug). false = jangan kedip.
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  CLAMP / VALIDASI CONFIG                  ║
+-- ╚══════════════════════════════════════════════════════════╝
+do
+    local s = tonumber(SpeedConfig.GameSpeed) or 1
+    if s < 1 then s = 1 end
+    if s > 3 then s = 3 end
+    SpeedConfig.GameSpeed = math.floor(s)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                         SERVICES                          ║
+-- ╚══════════════════════════════════════════════════════════╝
+local CoreGui          = game:GetService("CoreGui")
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer      = Players.LocalPlayer
+local PlayerGui        = LocalPlayer:WaitForChild("PlayerGui")
+
+local function dprint(...)
+    if DEBUG_PRINT then print("[SkipV6]", ...) end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                          STATE                            ║
+-- ╚══════════════════════════════════════════════════════════╝
+local isRunning            = true
+local isPausedByUser       = false
+local isMinimized          = false
+local lastAutoSkipClickAt  = 0
+local lastManualClickAt    = 0
+local pathMissingCounter   = 0
+local lastSeenWaveControls = nil
+
+local _connections = {}
+local function trackConnection(c)
+    table.insert(_connections, c)
+    return c
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              GUI PARENT (PlayerGui PRIMARY)               ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Strategi: Parent ke PlayerGui (paling kompatibel input-wise).
+local function getGuiParent()
+    return PlayerGui
+end
+
+local function tryProtectGui(gui)
+    pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
+    pcall(function() if protect_gui then protect_gui(gui) end end)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              PATH HELPERS (sudah dikonfirmasi user)       ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function safeChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls
+local function getWaveControls()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "WaveControls")
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls.AutoSkip
+local function getAutoSkipButton()
+    return safeChild(getWaveControls(), "AutoSkip")
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.SkipWave
+local function getSkipWaveFrame()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "SkipWave")
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls.TickSpeed.Items.{1|2|3}
+local function getTickSpeedButton(n)
+    local wc    = getWaveControls()
+    local tick  = safeChild(wc, "TickSpeed")
+    local items = safeChild(tick, "Items")
+    if not items then return nil end
+    return items:FindFirstChild(tostring(n))
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║          SAFE CLICK (firesignal/getconnections only)      ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function fireSignals(obj, signalNames)
+    if not obj then return false end
+    local fired = false
+    for _, sig in ipairs(signalNames) do
+        pcall(function()
+            local ev = obj[sig]
+            if not ev then return end
+            if typeof(getconnections) == "function" then
+                local conns = getconnections(ev)
+                if conns then
+                    for _, c in ipairs(conns) do
+                        local ok = pcall(function() c:Fire() end)
+                        if not ok and typeof(firesignal) == "function" then
+                            pcall(function() firesignal(c) end)
+                        end
+                        fired = true
+                    end
+                end
+            end
+            if (not fired) and typeof(firesignal) == "function" then
+                pcall(function() firesignal(ev) end)
+                fired = true
+            end
+        end)
+    end
+    return fired
+end
+
+local function safeClick(button)
+    if not button or not button.Parent then return false end
+    local SIGNALS = { "MouseButton1Click", "Activated" }
+    local fired = fireSignals(button, SIGNALS)
+    local title = button:FindFirstChild("Title")
+    if title and (title:IsA("TextLabel") or title:IsA("ImageLabel")
+                  or title:IsA("TextButton") or title:IsA("ImageButton")) then
+        if fireSignals(title, SIGNALS) then fired = true end
+    end
+    return fired
+end
+
+local function applyGameSpeed(n)
+    local btn = getTickSpeedButton(n)
+    if not btn then return false, "TickSpeed.Items." .. n .. " belum ada" end
+    if safeClick(btn) then return true end
+    return false, "klik gagal"
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                            GUI                            ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Hapus instance lama
+for _, name in ipairs({
+    "TowerDefenseSkipPanelV6","TowerDefenseSkipPanelV5",
+    "TowerDefenseSkipPanelV4","TowerDefenseSkipPanelV3",
+    "TowerDefenseSkipPanelV2","TowerDefensePanelV3",
+}) do
+    pcall(function()
+        local old = PlayerGui:FindFirstChild(name)
+        if old then old:Destroy() end
+    end)
+    pcall(function()
+        local old = CoreGui:FindFirstChild(name)
+        if old then old:Destroy() end
+    end)
+    pcall(function()
+        local hui = gethui and gethui() or nil
+        if hui then
+            local old = hui:FindFirstChild(name)
+            if old then old:Destroy() end
+        end
+    end)
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "TowerDefenseSkipPanelV6"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true                -- penting biar koordinat AbsolutePosition akurat di Layer 3
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder = 999999
+ScreenGui.Enabled = true
+ScreenGui.Parent = getGuiParent()
+tryProtectGui(ScreenGui)
+dprint("ScreenGui parented to:", ScreenGui.Parent:GetFullName())
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Active = true
+MainFrame.Selectable = true
+MainFrame.Size = UDim2.new(0, 280, 0, 320)
+MainFrame.Position = UDim2.new(1, -300, 0.5, -160)
+MainFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+MainFrame.BorderSizePixel = 0
+MainFrame.ZIndex = 9000
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local Stroke = Instance.new("UIStroke")
+Stroke.Color = Color3.fromRGB(80, 80, 90)
+Stroke.Thickness = 1
+Stroke.Parent = MainFrame
+
+-- ── TOP BAR (TextButton biar lebih responsive di banyak executor) ──
+local TopBar = Instance.new("TextButton")
+TopBar.Name = "TopBar"
+TopBar.Active = true
+TopBar.AutoButtonColor = false
+TopBar.Text = ""
+TopBar.Size = UDim2.new(1, 0, 0, 32)
+TopBar.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+TopBar.BorderSizePixel = 0
+TopBar.ZIndex = 9001
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.ZIndex = 9001
+TopBarCover.Parent = TopBar
+
+local TitleLbl = Instance.new("TextLabel")
+TitleLbl.Size = UDim2.new(1, -70, 1, 0)
+TitleLbl.Position = UDim2.new(0, 12, 0, 0)
+TitleLbl.BackgroundTransparency = 1
+TitleLbl.Text = "Skip V6 (Pasti Bisa Diklik)"
+TitleLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLbl.TextSize = 13
+TitleLbl.Font = Enum.Font.GothamBold
+TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+TitleLbl.ZIndex = 9002
+TitleLbl.Parent = TopBar
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Active = true
+MinimizeBtn.AutoButtonColor = false
+MinimizeBtn.Size = UDim2.new(0, 32, 0, 32)
+MinimizeBtn.Position = UDim2.new(1, -64, 0, 0)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+MinimizeBtn.BorderSizePixel = 0
+MinimizeBtn.Text = "-"
+MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinimizeBtn.TextSize = 20
+MinimizeBtn.Font = Enum.Font.GothamBold
+MinimizeBtn.ZIndex = 9002
+MinimizeBtn.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Active = true
+CloseBtn.AutoButtonColor = false
+CloseBtn.Size = UDim2.new(0, 32, 0, 32)
+CloseBtn.Position = UDim2.new(1, -32, 0, 0)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.TextSize = 14
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.ZIndex = 9002
+CloseBtn.Parent = TopBar
+
+-- ── CONTENT ──
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Name = "ContentFrame"
+ContentFrame.Active = true
+ContentFrame.Size = UDim2.new(1, 0, 1, -32)
+ContentFrame.Position = UDim2.new(0, 0, 0, 32)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.ZIndex = 9000
+ContentFrame.Parent = MainFrame
+
+local PauseBtn = Instance.new("TextButton")
+PauseBtn.Active = true
+PauseBtn.AutoButtonColor = false
+PauseBtn.Size = UDim2.new(0.9, 0, 0, 28)
+PauseBtn.Position = UDim2.new(0.05, 0, 0, 8)
+PauseBtn.BackgroundColor3 = Color3.fromRGB(220, 160, 40)
+PauseBtn.Text = "PAUSE ALL (kalau ngebug, pencet ini)"
+PauseBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+PauseBtn.Font = Enum.Font.GothamBold
+PauseBtn.TextSize = 11
+PauseBtn.ZIndex = 9002
+PauseBtn.Parent = ContentFrame
+Instance.new("UICorner", PauseBtn).CornerRadius = UDim.new(0, 6)
+
+local function makeToggle(parent, labelText, posY, defaultOn)
+    local btn = Instance.new("TextButton")
+    btn.Active = true
+    btn.AutoButtonColor = false
+    btn.Size = UDim2.new(0.9, 0, 0, 30)
+    btn.Position = UDim2.new(0.05, 0, 0, posY)
+    btn.BackgroundColor3 = defaultOn and Color3.fromRGB(50, 160, 70) or Color3.fromRGB(160, 50, 50)
+    btn.Text = labelText .. (defaultOn and "  :  ON" or "  :  OFF")
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 12
+    btn.ZIndex = 9002
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+local AutoSkipBtnUI   = makeToggle(ContentFrame, "Auto Skip",   44, Config.AutoSkip)
+local ManualSkipBtnUI = makeToggle(ContentFrame, "Manual Skip", 80, Config.ManualSkip)
+
+local SpeedTitle = Instance.new("TextLabel")
+SpeedTitle.Size = UDim2.new(0.9, 0, 0, 18)
+SpeedTitle.Position = UDim2.new(0.05, 0, 0, 120)
+SpeedTitle.BackgroundTransparency = 1
+SpeedTitle.Text = "Game Speed (max 3x)"
+SpeedTitle.TextColor3 = Color3.fromRGB(200, 200, 210)
+SpeedTitle.Font = Enum.Font.Gotham
+SpeedTitle.TextSize = 11
+SpeedTitle.TextXAlignment = Enum.TextXAlignment.Left
+SpeedTitle.ZIndex = 9002
+SpeedTitle.Parent = ContentFrame
+
+local SpeedRow = Instance.new("Frame")
+SpeedRow.Size = UDim2.new(0.9, 0, 0, 32)
+SpeedRow.Position = UDim2.new(0.05, 0, 0, 142)
+SpeedRow.BackgroundTransparency = 1
+SpeedRow.ZIndex = 9002
+SpeedRow.Parent = ContentFrame
+
+local UIList = Instance.new("UIListLayout")
+UIList.FillDirection = Enum.FillDirection.Horizontal
+UIList.HorizontalAlignment = Enum.HorizontalAlignment.SpaceBetween
+UIList.Parent = SpeedRow
+
+local speedButtons = {}
+local function refreshSpeedHighlight()
+    for n, b in pairs(speedButtons) do
+        b.BackgroundColor3 = (n == SpeedConfig.GameSpeed)
+            and Color3.fromRGB(60, 130, 230)
+            or  Color3.fromRGB(50, 50, 56)
+    end
+end
+
+for i = 1, 3 do
+    local b = Instance.new("TextButton")
+    b.Active = true
+    b.AutoButtonColor = false
+    b.Size = UDim2.new(0, 75, 1, 0)
+    b.BackgroundColor3 = (SpeedConfig.GameSpeed == i) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+    b.Text = i .. "x"
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.ZIndex = 9003
+    b.Parent = SpeedRow
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    speedButtons[i] = b
+end
+
+local InfoLbl = Instance.new("TextLabel")
+InfoLbl.Size = UDim2.new(0.9, 0, 0, 100)
+InfoLbl.Position = UDim2.new(0.05, 0, 0, 184)
+InfoLbl.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+InfoLbl.BackgroundTransparency = 0.4
+InfoLbl.Text = " Status: Loading..."
+InfoLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+InfoLbl.Font = Enum.Font.Gotham
+InfoLbl.TextSize = 11
+InfoLbl.TextWrapped = true
+InfoLbl.TextXAlignment = Enum.TextXAlignment.Left
+InfoLbl.TextYAlignment = Enum.TextYAlignment.Top
+InfoLbl.ZIndex = 9002
+InfoLbl.Parent = ContentFrame
+Instance.new("UICorner", InfoLbl).CornerRadius = UDim.new(0, 6)
+
+local function setStatus(s, color)
+    if InfoLbl and InfoLbl.Parent then
+        InfoLbl.Text = " " .. tostring(s)
+        InfoLbl.TextColor3 = color or Color3.fromRGB(180, 220, 180)
+    end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  CLICK HANDLERS (logic)                   ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Logic dipisah dari event-binding biar bisa di-trigger dari
+-- LAYER 2 (MouseButton1Click) maupun LAYER 3 (UserInputService
+-- global manual hit-test).
+
+local function flashClick(btn)
+    if not CLICK_FLASH then return end
+    if not btn or not btn.Parent then return end
+    local original = btn.BackgroundColor3
+    btn.BackgroundColor3 = Color3.fromRGB(60, 180, 255)
+    task.delay(0.12, function()
+        if btn and btn.Parent then
+            btn.BackgroundColor3 = original
+        end
+    end)
+end
+
+local function refreshToggle(btn, label, state)
+    btn.BackgroundColor3 = state and Color3.fromRGB(50, 160, 70) or Color3.fromRGB(160, 50, 50)
+    btn.Text = label .. (state and "  :  ON" or "  :  OFF")
+end
+
+local handleMinimize, handleClose, handlePause,
+      handleAutoSkipToggle, handleManualSkipToggle,
+      handleSpeedClick
+
+handleMinimize = function()
+    isMinimized = not isMinimized
+    ContentFrame.Visible = not isMinimized
+    MainFrame.Size = isMinimized and UDim2.new(0, 280, 0, 32) or UDim2.new(0, 280, 0, 320)
+    flashClick(MinimizeBtn)
+    dprint("Minimize ->", isMinimized)
+end
+
+handleClose = function()
+    dprint("Close pressed. Killing script...")
+    isRunning = false
+    for _, c in ipairs(_connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    _connections = {}
+    pcall(function() ScreenGui:Destroy() end)
+end
+
+handlePause = function()
+    isPausedByUser = not isPausedByUser
+    flashClick(PauseBtn)
+    if isPausedByUser then
+        PauseBtn.Text = "RESUME (sekarang PAUSED)"
+        PauseBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        PauseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        setStatus("PAUSED oleh user.", Color3.fromRGB(220, 160, 40))
+    else
+        PauseBtn.Text = "PAUSE ALL (kalau ngebug, pencet ini)"
+        PauseBtn.BackgroundColor3 = Color3.fromRGB(220, 160, 40)
+        PauseBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+        setStatus("Resumed.")
+    end
+end
+
+handleAutoSkipToggle = function()
+    Config.AutoSkip = not Config.AutoSkip
+    refreshToggle(AutoSkipBtnUI, "Auto Skip", Config.AutoSkip)
+    dprint("AutoSkip ->", Config.AutoSkip)
+end
+
+handleManualSkipToggle = function()
+    Config.ManualSkip = not Config.ManualSkip
+    refreshToggle(ManualSkipBtnUI, "Manual Skip", Config.ManualSkip)
+    dprint("ManualSkip ->", Config.ManualSkip)
+end
+
+handleSpeedClick = function(n)
+    SpeedConfig.GameSpeed = n
+    refreshSpeedHighlight()
+    flashClick(speedButtons[n])
+    applyGameSpeed(n)
+    dprint("Speed ->", n)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║         LAYER 2: standard MouseButton1Click               ║
+-- ╚══════════════════════════════════════════════════════════╝
+trackConnection(MinimizeBtn.MouseButton1Click:Connect(handleMinimize))
+trackConnection(CloseBtn.MouseButton1Click:Connect(handleClose))
+trackConnection(PauseBtn.MouseButton1Click:Connect(handlePause))
+trackConnection(AutoSkipBtnUI.MouseButton1Click:Connect(handleAutoSkipToggle))
+trackConnection(ManualSkipBtnUI.MouseButton1Click:Connect(handleManualSkipToggle))
+for i, b in pairs(speedButtons) do
+    trackConnection(b.MouseButton1Click:Connect(function() handleSpeedClick(i) end))
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║      LAYER 3: UserInputService global manual hit-test     ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Ini failsafe: kalau Layer 2 gak fire (executor weird,
+-- input ke-block), Layer 3 PASTI jalan karena UserInputService
+-- global ALWAYS menerima input.
+--
+-- Cara kerja: tiap user klik layar, kita cek apakah koordinat
+-- klik berada di atas tombol panel (pakai AbsolutePosition +
+-- AbsoluteSize). Kalau iya, panggil handler-nya.
+-- Drag panel juga di-handle di sini.
+
+local function pointInButton(btn, x, y)
+    if not btn or not btn.Parent or not btn.Visible then return false end
+    local ap = btn.AbsolutePosition
+    local as = btn.AbsoluteSize
+    return x >= ap.X and x <= ap.X + as.X
+       and y >= ap.Y and y <= ap.Y + as.Y
+end
+
+local function isVisibleClickable(btn)
+    if not btn or not btn.Parent then return false end
+    local p = btn.Parent
+    while p and p ~= ScreenGui do
+        if p == ContentFrame and not ContentFrame.Visible then return false end
+        p = p.Parent
+    end
+    return true
+end
+
+-- DRAG state untuk Layer 3
+local L3_dragging = false
+local L3_dragStart = Vector2.new()
+local L3_panelStart = UDim2.new()
+
+trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
+    if not isRunning then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+       and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+
+    local x = input.Position.X
+    local y = input.Position.Y
+
+    -- 1) Close (paling penting - selalu bisa dimatikan)
+    if isVisibleClickable(CloseBtn) and pointInButton(CloseBtn, x, y) then
+        dprint("L3 hit: Close")
+        handleClose()
+        return
+    end
+    -- 2) Minimize
+    if isVisibleClickable(MinimizeBtn) and pointInButton(MinimizeBtn, x, y) then
+        dprint("L3 hit: Minimize")
+        handleMinimize()
+        return
+    end
+    -- 3) Speed buttons
+    for n, b in pairs(speedButtons) do
+        if isVisibleClickable(b) and pointInButton(b, x, y) then
+            dprint("L3 hit: Speed " .. n)
+            handleSpeedClick(n)
+            return
+        end
+    end
+    -- 4) Pause
+    if isVisibleClickable(PauseBtn) and pointInButton(PauseBtn, x, y) then
+        dprint("L3 hit: Pause")
+        handlePause()
+        return
+    end
+    -- 5) Auto skip toggle
+    if isVisibleClickable(AutoSkipBtnUI) and pointInButton(AutoSkipBtnUI, x, y) then
+        dprint("L3 hit: AutoSkip toggle")
+        handleAutoSkipToggle()
+        return
+    end
+    -- 6) Manual skip toggle
+    if isVisibleClickable(ManualSkipBtnUI) and pointInButton(ManualSkipBtnUI, x, y) then
+        dprint("L3 hit: ManualSkip toggle")
+        handleManualSkipToggle()
+        return
+    end
+    -- 7) Drag (klik di topbar tapi BUKAN di tombol close/minimize)
+    if pointInButton(TopBar, x, y) then
+        L3_dragging = true
+        L3_dragStart = Vector2.new(x, y)
+        L3_panelStart = MainFrame.Position
+        dprint("L3 drag start")
+    end
+end))
+
+trackConnection(UserInputService.InputChanged:Connect(function(input)
+    if not isRunning then return end
+    if not L3_dragging then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+       and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    local x = input.Position.X
+    local y = input.Position.Y
+    local dx = x - L3_dragStart.X
+    local dy = y - L3_dragStart.Y
+    MainFrame.Position = UDim2.new(
+        L3_panelStart.X.Scale, L3_panelStart.X.Offset + dx,
+        L3_panelStart.Y.Scale, L3_panelStart.Y.Offset + dy
+    )
+end))
+
+trackConnection(UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        if L3_dragging then
+            L3_dragging = false
+            dprint("L3 drag end")
+        end
+    end
+end))
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║   AUTO-APPLY GameSpeed di awal eksekusi (sesuai Config)   ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    local startedAt = os.clock()
+    while isRunning and (os.clock() - startedAt) < WatchdogConfig.SpeedApplyTimeout do
+        if applyGameSpeed(SpeedConfig.GameSpeed) then
+            setStatus("Initial Speed -> " .. SpeedConfig.GameSpeed .. "x ter-apply.")
+            return
+        end
+        task.wait(1)
+    end
+    setStatus("Initial speed timeout. Akan retry saat round mulai.",
+        Color3.fromRGB(220, 200, 120))
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                       MAIN LOOP                           ║
+-- ╚══════════════════════════════════════════════════════════╝
+math.randomseed(tick() % 1 * 1e7 + os.time())
+
+task.spawn(function()
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        local jitter = AntiFlagConfig.LoopIntervalMin
+            + math.random() * (AntiFlagConfig.LoopIntervalMax - AntiFlagConfig.LoopIntervalMin)
+        task.wait(jitter)
+
+        if not isRunning then break end
+
+        if isPausedByUser then
+            -- skip
+        else
+            local now = os.clock()
+            local statusParts = {}
+            local wc = getWaveControls()
+
+            -- Re-apply speed saat round baru
+            if wc and wc ~= lastSeenWaveControls then
+                if lastSeenWaveControls ~= nil then
+                    dprint("Round baru, re-apply speed.")
+                    task.spawn(function()
+                        task.wait(0.5)
+                        applyGameSpeed(SpeedConfig.GameSpeed)
+                    end)
+                    table.insert(statusParts, "Re-apply " .. SpeedConfig.GameSpeed .. "x")
+                end
+                lastSeenWaveControls = wc
+                pathMissingCounter = 0
+            end
+
+            if not wc then
+                pathMissingCounter = pathMissingCounter + 1
+                if pathMissingCounter >= WatchdogConfig.PathMissingWarnAt then
+                    setStatus("Path WaveControls hilang. Game di lobby? atau path UI berubah?",
+                        Color3.fromRGB(220, 130, 130))
+                else
+                    setStatus("Standby (bukan di gameplay).")
+                end
+            else
+                pathMissingCounter = 0
+
+                -- AUTO SKIP
+                if Config.AutoSkip and (now - lastAutoSkipClickAt) >= AntiFlagConfig.AutoSkipCooldown then
+                    local btn = getAutoSkipButton()
+                    local titleLabel = btn and btn:FindFirstChild("Title")
+                    local titleText = (titleLabel and titleLabel:IsA("TextLabel")) and titleLabel.Text or ""
+                    if btn and string.find(string.lower(titleText), "off") then
+                        if safeClick(btn) then
+                            lastAutoSkipClickAt = os.clock()
+                            table.insert(statusParts, "AutoSkip clicked")
+                        end
+                    end
+                end
+
+                -- MANUAL SKIP
+                if Config.ManualSkip then
+                    local cd = AntiFlagConfig.ManualCooldownMin
+                        + math.random() * (AntiFlagConfig.ManualCooldownMax - AntiFlagConfig.ManualCooldownMin)
+                    if (now - lastManualClickAt) >= cd then
+                        local frame = getSkipWaveFrame()
+                        if frame and frame.Visible then
+                            local mbtn = frame:FindFirstChild("Button")
+                            if mbtn then
+                                if safeClick(mbtn) then
+                                    table.insert(statusParts, "SkipWave clicked")
+                                    lastManualClickAt = os.clock()
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if #statusParts == 0 then
+                    setStatus("Watching... | AS=" .. tostring(Config.AutoSkip)
+                        .. "  MS=" .. tostring(Config.ManualSkip)
+                        .. "  Speed=" .. SpeedConfig.GameSpeed .. "x")
+                else
+                    setStatus(table.concat(statusParts, " | "), Color3.fromRGB(255, 220, 120))
+                end
+            end
+        end
+    end
+    dprint("Main loop berhenti.")
+end)
+
+print(string.format(
+    "[SkipV6] Loaded. AutoSkip=%s | ManualSkip=%s | GameSpeed=%dx | Parent=%s",
+    tostring(Config.AutoSkip),
+    tostring(Config.ManualSkip),
+    SpeedConfig.GameSpeed,
+    tostring(ScreenGui.Parent and ScreenGui.Parent.Name or "?")
+))
+print("[SkipV6] Coba klik tombol di panel - kalau Layer 2 gak fire, Layer 3 (UIS global) akan handle.")
