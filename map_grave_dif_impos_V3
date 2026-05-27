@@ -1,0 +1,1803 @@
+-- ==========================================
+-- AUTO PLACE UNIT V1 (Lean: Timer-only Unlock + Instant Priority @ T-1s)
+-- ==========================================
+-- Revisi V1 (lanjutan dari V20, fokus: optimisasi & ringkas):
+--
+--   [V1 FIX #1] UNLOCK 100% BERBASIS TIMER ⏱
+--      Sumber unlock placement sekarang TUNGGAL: ketika widget timer ⏱
+--      ke-baca <= TIMER_UNLOCK_AT_SEC (default 1 detik) -> placementUnlocked=true,
+--      slot priority langsung di-fire instant (BURST mode aktif).
+--      Tidak ada lagi cek 'Enemies incoming!' / DifficultyVote / countdown.
+--
+--      Mid-game join: kalau saat boot timer sudah > TIMER_UNLOCK_AT_SEC
+--      (artinya wave aktif), fallback unlock pertama kali timer ke-baca
+--      setelah bootCompleted.
+--
+--   [V21 FIX #2] HAPUS METHOD LAMA -> SCRIPT LEBIH RINGAN
+--      Yang dihapus dari V20:
+--        * readDifficultyVoteOnce, processDifficultyVote (DELETED)
+--        * vote loop (task.spawn) - hilang
+--        * COUNTDOWN branch di readWaveOnce - hilang
+--        * INCOMING branch di readWaveOnce - hilang (DETECT_INCOMING_AFTER_STOP juga off)
+--        * State: lastChooseLevel/Raw, chooseLevelSeen, voteSeenAtGame,
+--                 enemiesIncomingSeen, lastCountdownSeen, timerSeenHigh
+--        * Config: UNLOCK_ON_CHOOSE_LEVEL*, UNLOCK_REQUIRES_CHOOSE_LEVEL_DONE,
+--                 UNLOCK_ON_TIMER*, UNLOCK_ON_COUNTDOWN, UNLOCK_ON_INCOMING,
+--                 COUNTDOWN_MIN/MAX, DETECT_VOTE_REAPPEAR,
+--                 DETECT_INCOMING_AFTER_STOP, VOTE_POLL, DEBUG_VOTE
+--        * GUI: VoteLbl, IncomingLbl - dihapus
+--
+--   [V21 FIX #3] WAVE READER DI-RAMPING
+--      Hanya baca pola "Wave N". Tidak parse countdown / incoming / other.
+--      Wave juga hanya di-track SETELAH placementUnlocked (anti
+--      false-positive saat masih lobby).
+--
+--   [tetap dari V20] dual-format parseMMSS (terima "⏱ 56" & "⏱ 1:00"),
+--      single-scan widget cache lock, persistent cache lintas game-reset.
+--
+--   [tetap dari V19/V18/V17] random priority bag, giveup-retry,
+--      reconcile-from-UI, burst, anti-macro, cash gate, backup.
+-- ==========================================
+
+print("[AutoPlaceV22] Boot: starting...")
+
+local _unpack = table.unpack or unpack
+math.randomseed(tick() * 1000 % 2147483647)
+for i = 1, 8 do math.random() end
+
+
+-- ==========================================
+-- [V22 FIX] KILL SWITCH / SINGLETON GUARD
+-- ==========================================
+-- MASALAH V21: saat script di-execute ulang atau GUI ditutup (CloseBtn),
+-- task.spawn(while true do ... end) yang lama tetap jalan di background ->
+-- jadi "ghost script", numpuk, dan beban executor naik tiap re-execute.
+--
+-- SOLUSI:
+--   1. Tiap kali script load, generate SCRIPT_ID unik.                            -- token instance ini
+--   2. Simpan ID ini di _G.__AutoPlace_ACTIVE_ID -> instance lama otomatis "kalah" -- otomatis invalidate instance lama
+--      karena semua while-loop dia cek isAlive() (== bandingkan ID).
+--   3. CloseBtn / re-execute -> set _G ID = nil -> semua loop di instance ini    -- exit total semua loop
+--      langsung exit di iterasi berikutnya.
+--   4. Connection RBXScript juga di-track lalu di-disconnect saat close.
+local SCRIPT_ID = "APV22_" .. tostring(tick()) .. "_" .. tostring(math.random(1, 1e9)) -- token unik instance ini
+
+-- (a) Bunuh instance LAMA: kalau ada token lama, override dengan kita -> loop lama exit
+if _G.__AutoPlace_ACTIVE_ID ~= nil then
+    print("[AutoPlaceV22] Found old instance ID=" .. tostring(_G.__AutoPlace_ACTIVE_ID)
+        .. " -> invalidating (loops lama akan exit).")
+end
+_G.__AutoPlace_ACTIVE_ID = SCRIPT_ID                              -- instance baru aktif
+
+-- (b) Hapus GUI lama yang mungkin masih nyangkut (sisa instance sebelumnya)
+do
+    local _CoreGui = game:GetService("CoreGui")
+    for _, name in ipairs({ "AutoPlaceGUI", "AutoPlaceV21_GUI", "AutoPlaceV22_GUI" }) do
+        local oldGui = _CoreGui:FindFirstChild(name)
+        if oldGui then pcall(function() oldGui:Destroy() end) end           -- bersihkan GUI orphan
+    end
+end
+
+-- (c) Helper cek instance: dipanggil tiap iterasi loop
+local function isAlive()
+    return _G.__AutoPlace_ACTIVE_ID == SCRIPT_ID                  -- true = instance ini masih master
+end
+
+-- (d) Pelacak koneksi -> dipakai utk disconnect saat CloseBtn dipencet
+local _trackedConns = {}
+local function trackConn(c)
+    if c then table.insert(_trackedConns, c) end
+    return c
+end
+local function disconnectAllConns()
+    for _, c in ipairs(_trackedConns) do pcall(function() c:Disconnect() end) end -- putus semua koneksi
+    _trackedConns = {}
+end
+
+
+-- ==========================================
+-- CONFIGURATION  (V21 - lebih ramping dari V20)
+-- ==========================================
+-- FORMAT TIAP BARIS:
+--    KEY = VALUE,   -- [KATEGORI] guna: ...  | nilai: ...  | efek: ...
+--
+-- KATEGORI:
+--   [1]  CORE         identitas script & unit target
+--   [2]  TIMING       semua delay/polling (detik)
+--   [3]  PRIORITY     slot prioritas (dipasang dulu sebelum main)
+--   [4]  BURST        boost awal saat unlock (placement super cepat)
+--   [5]  GATE         syarat boleh mulai placement (TIMER ONLY di V21)
+--   [6]  TIMER_FILTER filter widget timer asli + cache
+--   [7]  WAVE         auto ON/OFF berdasarkan nomor wave
+--   [8]  RESET        deteksi game baru / round reset
+--   [9]  CAP          batas total unit
+--   [10] ANTI-MACRO   variasi anti-deteksi pola robotik
+--   [11] BACKUP       slot tambahan untuk wave tinggi
+--   [12] CASH         gate cash untuk main/backup (priority bypass)
+--   [13] LOGGING      verbose/debug
+-- ==========================================
+local CONFIG = {
+
+    -- ===========================================================
+    -- [1] CORE  (identitas script & target unit)
+    -- ===========================================================
+    AUTO_START   = true,                    -- [CORE] guna: script langsung jalan saat di-load. | nilai: true/false. | efek: false = harus klik "Status: ON" dulu di GUI.
+    TARGET_UNIT  = "unit_log_roller",     -- [CORE] guna: nama internal unit yg akan di-place server-side. | nilai: case-sensitive sesuai game. | efek: salah nama = server selalu reject.
+
+    -- ===========================================================
+    -- [2] TIMING  (semua delay & polling - satuan: detik)
+    -- ===========================================================
+    BOOT_DELAY   = 0.0,    -- [TIMING] guna: jeda sebelum script mulai bekerja. | nilai: 0-5. | efek: 0 = instan.
+    LOOP_DELAY   = 3.50,   -- [TIMING] guna: jeda antar peletakan unit_log_roller di MAIN loop. | nilai dalam DETIK (float). | NOTE: 3.50 = 3 detik 500 ms (bukan 3 detik 50 ms!). | konversi: 3.05 = 3d 50ms; 3.50 = 3d 500ms; 1.25 = 1d 250ms.
+    LOOP_JITTER  = 0.02,   -- [TIMING] guna: variasi acak ± LOOP_DELAY. | nilai: 0-0.05. | efek: anti-deteksi pola macro.
+    WAVE_POLL    = 0.05,   -- [TIMING] guna: interval baca teks Wave. | nilai: 0.03-0.20. | efek: kecil = respons wave cepat ke-detect.
+    TIMER_POLL   = 0.03,   -- [TIMING] guna: interval baca .Text dari widget timer (cached, sangat ringan). | nilai: 0.02-0.10. | efek: kecil = trigger T-1s lebih akurat (rekomendasi).
+    UI_POLL      = 0.25,   -- [TIMING] guna: interval refresh counter UI unit terpasang. | nilai: 0.10-0.50. | efek: jangan terlalu kecil, beban UI.
+    MIN_YIELD    = 0.0,    -- [TIMING] guna: minimum yield setiap loop placement. | nilai: 0-0.02. | efek: 0 = pakai task.wait() default Roblox.
+
+
+    -- ===========================================================
+    -- [3] PRIORITY  (slot prioritas - dipasang dulu saat T-1s)
+    -- ===========================================================
+    PRIORITY_LOCK                    = false,   -- [PRIORITY] guna: aktifkan logic priority. | nilai: true/false. | efek: false = langsung main loop tanpa priority.
+    PRIORITY_DELAY                   = 0.10,   -- [PRIORITY] guna: jeda setelah priority SUKSES sebelum slot berikutnya. | nilai: 0.05-0.30. | efek: kecil = cepat tapi rawan reject server.
+    PRIORITY_FAIL_DELAY              = 0.15,   -- [PRIORITY] guna: jeda setelah priority GAGAL. | nilai: 0.10-0.50. | efek: anti-spam retry agresif.
+    PRIORITY_MAX_TRIES               = 25,     -- [PRIORITY] guna: maks retry per slot sebelum di-mark GIVEUP. | nilai: 10-50. | efek: kecil = main loop cepat dijalankan walau priority belum kelar.
+    PRIORITY_VERIFY_UI               = true,   -- [PRIORITY] guna: verifikasi via UI counter sebelum tandai sukses. | nilai: true/false. | efek: true = akurat, false = lebih cepat.
+    PRIORITY_VERIFY_WAIT             = 0.10,   -- [PRIORITY] guna: jeda menunggu UI counter ter-update sebelum verifikasi. | nilai: 0.05-0.20. | efek: kecil = bisa ke-baca sebelum UI sync.
+    PRIORITY_BYPASS_CASH             = true,   -- [PRIORITY] guna: priority skip cash gate. | nilai: true/false. | efek: true = priority dicoba walau cash kurang (server tetap bisa reject).
+    PRIORITY_RECONCILE_UI            = true,   -- [PRIORITY] guna: bila UI count >= jumlah priority, langsung mark satisfied. | nilai: true/false. | efek: anti-stuck saat verify lag.
+    PRIORITY_RANDOM_ORDER            = true,   -- [PRIORITY] guna: peletakan priority diacak via shuffle bag. | nilai: true/false. | efek: true = anti-pattern detection.
+    PRIORITY_INTERLEAVE_CHANCE       = 0.25,   -- [PRIORITY] guna: peluang slot priority dicoba di sela main saat wave ready & priority masih pending. | nilai: 0.0-1.0. | efek: 0 = priority ditinggal, 1 = priority selalu dicoba dulu.
+    PRIORITY_RETRY_AFTER_GIVEUP_SEC  = 8.0,    -- [PRIORITY] guna: detik untuk reset attempts slot GIVEUP -> dicoba ulang. | nilai: 5-30. | efek: kecil = sering retry slot mati.
+    PRIORITY_MAX_GIVEUP_RETRIES      = 5,      -- [PRIORITY] guna: maks SIKLUS giveup-retry per slot. | nilai: 0-10. | efek: 0 = unlimited.
+
+    -- ===========================================================
+    -- [4] INSTANT BURST  (placement super cepat di awal unlock)
+    -- ===========================================================
+    -- (V21) burst aktif PERSIS setelah unlock via TIMER@T-1s -> N placement pertama tanpa jeda
+    FAST_PLACE_FIRST_N     = 8,     -- [BURST] guna: N placement pertama dijalankan tanpa jeda. | nilai: 0-15. | efek: 0 = tidak ada burst; besar = boost lebih panjang.
+    FAST_PLACE_DELAY       = 0.00,  -- [BURST] guna: jeda saat burst. | nilai: 0-0.05. | efek: 0 = secepat mungkin.
+    FAST_PLACE_SKIP_VERIFY = true,  -- [BURST] guna: lewati verifikasi UI saat burst agar lebih cepat. | nilai: true/false. | efek: true = burst lebih cepat.
+
+
+    -- ===========================================================
+    -- [5] PLACEMENT GATE  (V21: TIMER ONLY, sumber unlock TUNGGAL)
+    -- ===========================================================
+    REQUIRE_PLACEMENT_GATE = true,  -- [GATE] guna: wajib lewati gate sebelum placement. | nilai: true/false. | efek: false = placement bisa ditembak kapan saja, sangat rawan ban.
+    TIMER_UNLOCK_AT_SEC    = 1,     -- [GATE/TIMER] (V21 NEW) guna: detik <= angka ini = unlock + instant priority burst. | nilai: 1-3. | efek: 1 = persis sebelum wave 1 mulai (paling tepat); 2-3 = lebih awal sedikit.
+    TIMER_RESET_JUMP       = 60,    -- [GATE/RESET] guna: lonjakan detik untuk deteksi reset (curr - prev). | nilai: 30-120. | efek: 60 = reset terdeteksi kalau timer naik >=60s tiba-tiba (game baru).
+
+    -- (5b) Main loop control
+    MAIN_START_WAVE           = 2,     -- [GATE/MAIN] guna: wave minimum untuk mulai MAIN placement. | nilai: 1-3. | efek: priority biasanya di wave 1, main mulai wave 2.
+    MAIN_REQUIRES_PRIORITY_OK = false, -- [GATE/MAIN] guna: main JALAN walau priority gagal/giveup. | nilai: true/false. | efek: false = main tetap jalan supaya cap tercapai.
+    MAIN_FORCE_AFTER_WAVE     = true,  -- [GATE/MAIN] guna: sekali wave>=MAIN_START_WAVE, main loop wajib jalan terus sampai cap. | nilai: true/false. | efek: true = main dominan.
+    WAVE_BOOT_TIMEOUT         = 30.0,  -- [GATE] guna: maks tunggu sinyal unlock saat boot (detik). | nilai: 10-60. | efek: setelah ini = mid-game fallback diizinkan (timer ke-baca >0 langsung unlock).
+
+    -- ===========================================================
+    -- [6] TIMER WIDGET FILTER  (filter widget timer asli + cache)
+    -- ===========================================================
+    TIMER_REQUIRE_CLOCK_EMOJI         = true,  -- [TIMER_FILTER] guna: HANYA terima widget IconLabel.Text yg mengandung "⏱". | nilai: true/false. | efek: true = anti nyasar ke widget lain.
+    TIMER_USE_WIDGET_CACHE            = true,  -- [TIMER_FILTER/CACHE] guna: setelah widget ⏱ ketemu sekali, simpan reference, polling next baca .Text saja. | nilai: true/false. | efek: true = di game ke-2,3,... TIDAK ada scanning ulang.
+    TIMER_PERSIST_CACHE_ACROSS_RESET  = true,  -- [TIMER_FILTER/CACHE] guna: cache tetap dipertahankan saat round reset. | nilai: true/false. | efek: true = sekali ⏱ ketemu, tidak akan dicari ulang.
+    TIMER_INITIAL_FAST_SCANS          = 40,    -- [TIMER_FILTER/CACHE] guna: jumlah polling pertama yg dipaksa rapid. | nilai: 20-80. | efek: besar = lebih agresif cari widget di awal session.
+    TIMER_INITIAL_FAST_INTERVAL       = 0.02,  -- [TIMER_FILTER/CACHE] guna: interval polling rapid awal (detik). | nilai: 0.01-0.05. | efek: kecil = widget cepat ketemu.
+
+    -- ===========================================================
+    -- [7] WAVE CONTROL  (auto ON/OFF berdasarkan nomor wave)
+    -- ===========================================================
+    WAVE_CONTROL = true,    -- [WAVE] guna: aktifkan logic wave-based ON/OFF. | nilai: true/false. | efek: true = script auto-pause saat lewat STOP_WAVE.
+    START_WAVE   = 2,       -- [WAVE] guna: wave saat status auto-ON. | nilai: 1-3. | efek: biasanya 1.
+    STOP_WAVE    = 9,      -- [WAVE] guna: wave saat status auto-OFF. | nilai: tergantung map. | efek: setelah wave ini = pause + tunggu reset.
+
+    -- ===========================================================
+    -- [8] AUTO-RESTART  (deteksi game baru / round reset)
+    -- ===========================================================
+    AUTO_RESET           = true,  -- [RESET] guna: aktifkan auto-reset state antar game. | nilai: true/false. | efek: true = state placement di-clear saat game baru.
+    DETECT_WAVE_DECREASE = true,  -- [RESET] guna: reset bila wave turun (mis. 5 -> 1). | nilai: true/false. | efek: indikator paling kuat untuk game baru.
+    DETECT_TIMER_RESET   = true,  -- [RESET] guna: reset bila timer melonjak naik tiba-tiba (>= TIMER_RESET_JUMP). | nilai: true/false. | efek: detect saat timer di-reset oleh server.
+    RESET_COOLDOWN       = 1.5,   -- [RESET] guna: jeda setelah reset (detik). | nilai: 1-3. | efek: kasih waktu UI lama hilang & UI baru muncul.
+
+
+    -- ===========================================================
+    -- [9] CAP  (batas jumlah unit yang dipasang)
+    -- ===========================================================
+    PlacementUnitMaxCap   = 2,    -- [CAP] guna: maks total unit yang dipasang sebelum berhenti. | nilai: budget cash & strategi. | efek: 20 = stop setelah 20 unit terpasang.
+    CAP_COUNT_ONLY_TARGET = true,  -- [CAP] guna: cap hanya hitung TARGET_UNIT, bukan semua unit. | nilai: true/false. | efek: true = cap hanya untuk unit_tomato_plant.
+
+    -- ===========================================================
+    -- [10] ANTI-MACRO  (variasi anti-deteksi pola robotik)
+    -- ===========================================================
+    POSITION_OFFSET = 0.05,        -- [ANTI-MACRO] guna: offset acak posisi (stud) ± nilai ini. | nilai: 0-0.20. | efek: 0 = tepat di slot (pola robotik), 0.05 = sedikit goyang.
+    ROTATION_MODE   = "smooth",    -- [ANTI-MACRO] guna: mode rotasi unit. | nilai: "step90"/"smooth"/"fixed"/"off". | efek: step90 default = 0/90/180/270 acak.
+    FIXED_ROT_DEG   = 0,           -- [ANTI-MACRO] guna: derajat rotasi saat ROTATION_MODE = "fixed". | nilai: 0-359. | efek: hanya berlaku saat mode fixed.
+
+    -- ===========================================================
+    -- [11] BACKUP  (slot tambahan setelah wave tertentu)
+    -- ===========================================================
+    USE_BACKUP        = true,    -- [BACKUP] guna: aktifkan slot backup. | nilai: true/false. | efek: true = setelah BACKUP_AFTER_WAVE, ada peluang dipilih backup.
+    BACKUP_AFTER_WAVE = 5,       -- [BACKUP] guna: backup mulai aktif dari wave ini ke atas. | nilai: 3-8. | efek: kecil = backup aktif lebih awal.
+    BACKUP_CHANCE     = 0.5,     -- [BACKUP] guna: probabilitas pilih backup vs main. | nilai: 0.0-1.0. | efek: 0 = selalu main; 1 = selalu backup.
+
+    -- ===========================================================
+    -- [12] CASH GATE  (untuk MAIN/BACKUP saja, priority bypass)
+    -- ===========================================================
+    REQUIRE_CASH_GATE  = true,   -- [CASH] guna: wajib cash cukup sebelum MAIN/BACKUP placement. | nilai: true/false. | efek: false = main/backup dicoba walau cash kurang.
+    CASH_SAFETY_BUFFER = 0,      -- [CASH] guna: buffer cash ekstra (jaga-jaga). | nilai: 0-100. | efek: 0 = pakai harga unit pas.
+    UNIT_PRICES = {              -- [CASH] guna: tabel harga per unit untuk cash gate. | nilai: sesuai harga in-game. | efek: salah harga = cash gate kacau.
+        ["unit_log_roller"] = 500,
+    },
+
+    -- ===========================================================
+    -- [13] LOGGING  (debug & verbose - matikan saat play normal)
+    -- ===========================================================
+    VERBOSE       = false,    -- [LOG] guna: log umum. | nilai: true/false. | efek: true = banyak info di console (F9), false = senyap.
+    LOUD_PRIORITY = true,    -- [LOG] guna: log per-attempt priority. | nilai: true/false. | efek: berguna saat debug priority.
+    DEBUG_GATE    = false,   -- [LOG] guna: log aktivitas gate. | nilai: true/false. | efek: aktifkan kalau curiga gate salah block.
+    DEBUG_TIMER   = false,   -- [LOG] guna: log pembacaan timer setiap ~1 detik. | nilai: true/false. | efek: aktifkan kalau curiga timer salah baca.
+    DEBUG_CASH    = false,   -- [LOG] guna: log pembacaan cash. | nilai: true/false. | efek: aktifkan kalau curiga cash salah baca.
+}
+
+-- ==========================================
+-- PLACEMENT SLOTS
+-- ==========================================
+local SLOTS_PRIORITY = {
+    { -335.41595458984375, 61.93030548095703, -841.2335205078125 },
+    --{ -338.4619140625,  61.68030548095703, -105.03054809570312 },
+}
+
+
+local SLOTS_MAIN = {
+    -- LAYER 1
+    { -335.41595458984375, 61.93030548095703, -841.2335205078125 },
+    { -335.41595458984375, 61.93030548095703, -840.3734130859375 },
+    { -335.41595458984375, 61.93030548095703, -839.2827758789062 },
+    { -335.41595458984375, 61.93030548095703, -837.88134765625 },
+    { -335.41595458984375, 61.93030548095703, -836.6087646484375 },
+    { -335.41595458984375, 61.93030548095703, -834.9481201171875 },
+    -- LAYER 2
+    --{ -330.1163024902344, 61.68030548095703, -134.24404907226562 },
+    --{ -330.1163024902344, 61.68030548095703, -131.9630126953125  },
+    --{ -330.1163024902344, 61.68030548095703, -129.72555541992188 },
+    --{ -330.1163024902344, 61.68030548095703, -127.57781982421875 },
+    --{ -330.1163024902344, 61.68030548095703, -125.37130737304688 },
+    --{ -330.1163024902344, 61.68030548095703, -123.1337890625     },
+    -- LAYER 3
+    --{ -327.88763427734375, 61.68030548095703, -134.24404907226562 },
+    --{ -327.88763427734375, 61.68030548095703, -131.9630126953125  },
+    --{ -327.88763427734375, 61.68030548095703, -129.72555541992188 },
+    --{ -327.88763427734375, 61.68030548095703, -127.57781982421875 },
+    --{ -327.88763427734375, 61.68030548095703, -125.37130737304688 },
+    --{ -327.88763427734375, 61.68030548095703, -123.1337890625     },
+}
+
+local SLOTS_BACKUP = {}
+
+print(string.format("[AutoPlaceV21] Slots: priority=%d main=%d backup=%d  cap=%d",
+    #SLOTS_PRIORITY, #SLOTS_MAIN, #SLOTS_BACKUP, CONFIG.PlacementUnitMaxCap))
+
+-- SERVICES
+local CoreGui            = game:GetService("CoreGui")
+local UserInputService   = game:GetService("UserInputService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local LocalPlayer        = Players.LocalPlayer
+
+
+-- ==========================================
+-- STATE  (V21: vote/incoming/countdown state DIHAPUS)
+-- ==========================================
+local isRunning            = CONFIG.AUTO_START
+local prioritySatisfied    = {}
+local priorityAttempts     = {}
+local priorityGivenUp      = {}
+local priorityGiveupCycles = {}
+local priorityGiveupSince  = {}
+local priorityBag          = {}
+local mainSatisfied        = {}
+local mainBag, backupBag   = {}, {}
+local stats = {
+    placed_p = 0, ok_p = 0, fail_p = 0,
+    placed_m = 0, ok_m = 0, fail_m = 0,
+    placed_b = 0, ok_b = 0, fail_b = 0,
+}
+local lastResult            = "-"
+local lastWaveNum           = -1
+local lastWaveTextRaw       = "-"
+local maxWaveSeen           = -1
+local placementUnlocked     = false
+local unlockSource          = "-"
+local currentPhase          = "init"
+local gameCount             = 1
+local lastResetAt           = 0
+local pendingReset          = false
+local pausedUntil           = 0
+local lastUITargetCount     = 0
+local lastUIAllUnits        = 0
+local capReached            = false
+-- Timer state
+local lastTimerSec          = -1
+local lastTimerRaw          = "-"
+local lastTimerSrc          = "-"
+local timerDebugAt          = 0
+-- (V19+) Timer widget cache PERSISTENT lintas game-reset
+local cachedTimerLabel      = nil   -- referensi ke IconLabel widget timer ⏱
+local cachedTimerWidget     = nil
+local cachedTimerName       = "-"
+local timerScanCount        = 0     -- untuk fast-initial-scans
+local timerEverFound        = false -- pernah ketemu? (TIDAK di-reset di game baru)
+-- Cash state
+local lastCash              = -1
+local lastCashRaw           = "-"
+-- Burst state
+local placementsSinceUnlock = 0
+-- Boot phase tracker (untuk mid-game fallback unlock)
+local bootCompleted         = false
+
+
+-- ==========================================
+-- HELPERS
+-- ==========================================
+local function randFloat(a, b) return a + (b - a) * math.random() end
+local function randInt(a, b)   return math.random(a, b) end
+local function strLower(s) if type(s) ~= "string" then return "" end; return string.lower(s) end
+local function strContains(s, n) if type(s) ~= "string" or type(n) ~= "string" then return false end; return string.find(s, n, 1, true) ~= nil end
+local function startsWith(s, p) if type(s) ~= "string" or type(p) ~= "string" then return false end; return string.sub(s, 1, #p) == p end
+local function safeYield(d) if d and d > 0 then task.wait(d) else task.wait() end end
+
+local function inBurstMode()
+    return placementUnlocked and placementsSinceUnlock < (CONFIG.FAST_PLACE_FIRST_N or 0)
+end
+
+local function hasPendingPriority()
+    if not CONFIG.PRIORITY_LOCK then return false end
+    for i = 1, #SLOTS_PRIORITY do
+        if not prioritySatisfied[i] and not priorityGivenUp[i]
+           and priorityAttempts[i] < CONFIG.PRIORITY_MAX_TRIES then
+            return true
+        end
+    end
+    return false
+end
+
+local function hasGivenUpPriority()
+    if not CONFIG.PRIORITY_LOCK then return false end
+    for i = 1, #SLOTS_PRIORITY do
+        if not prioritySatisfied[i]
+           and (priorityGivenUp[i] or priorityAttempts[i] >= CONFIG.PRIORITY_MAX_TRIES) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Setelah PRIORITY_RETRY_AFTER_GIVEUP_SEC, slot giveup dipulihkan
+local function recoverGiveupPrioritySlots()
+    local sec = CONFIG.PRIORITY_RETRY_AFTER_GIVEUP_SEC or 0
+    if sec <= 0 then return end
+    local maxCycles = CONFIG.PRIORITY_MAX_GIVEUP_RETRIES or 0
+    local now = os.clock()
+    for i = 1, #SLOTS_PRIORITY do
+        if priorityGivenUp[i] and not prioritySatisfied[i] then
+            if (now - (priorityGiveupSince[i] or 0)) >= sec
+               and not (maxCycles > 0 and (priorityGiveupCycles[i] or 0) >= maxCycles) then
+                priorityGiveupCycles[i] = (priorityGiveupCycles[i] or 0) + 1
+                priorityGivenUp[i]      = false
+                priorityAttempts[i]     = 0
+                priorityGiveupSince[i]  = 0
+                if CONFIG.LOUD_PRIORITY then
+                    print(string.format("[AutoPlaceV21] priority P%d giveup-cycle #%d -> retry",
+                        i, priorityGiveupCycles[i]))
+                end
+            end
+        end
+    end
+end
+
+
+-- ==========================================
+-- TIMER READER (V20 logic + V21 trigger di T-1s)
+-- ==========================================
+-- parseMMSS dual-format:
+--   "M:SS" (mis. "⏱ 1:00", "⏱ 5:23")  ATAU  detik saja (mis. "⏱ 0", "⏱ 56", "⏱ 59").
+local function parseMMSS(t)
+    if type(t) ~= "string" then return nil end
+    if string.find(t, ":", 1, true) then
+        local m, s = string.match(t, "(%d+)%s*:%s*(%d+)")
+        if m and s then
+            local mm = tonumber(m) or 0
+            local ss = tonumber(s) or 0
+            if ss <= 99 then return mm * 60 + ss end
+        end
+        return nil
+    end
+    -- tanpa ":" -> ambil angka pertama 0-99 sebagai detik
+    local n = string.match(t, "(%d+)")
+    if n then
+        local v = tonumber(n)
+        if v and v >= 0 and v <= 99 then return v end
+    end
+    return nil
+end
+
+local function hasClockEmoji(t)
+    if type(t) ~= "string" then return false end
+    return string.find(t, "⏱", 1, true) ~= nil
+end
+
+local function isCachedTimerLabelAlive()
+    if not cachedTimerLabel then return false end
+    local ok, alive = pcall(function()
+        if not cachedTimerLabel.Parent then return false end
+        if not cachedTimerLabel:IsA("TextLabel") then return false end
+        return true
+    end)
+    return ok and alive == true
+end
+
+local function invalidateTimerCache()
+    cachedTimerLabel  = nil
+    cachedTimerWidget = nil
+    cachedTimerName   = "-"
+end
+
+
+-- Path: PlayerGui.TopbarStandard.Holders.Right.<Widget ⏱>.IconButton.Menu.IconSpot.Contents.IconLabelContainer.IconLabel
+-- Iterasi children Holders.Right HANYA sekali. Setelah cache LOCKED tidak akan dipanggil lagi.
+local function tryDirectTimerPath(pGui)
+    local tbs  = pGui  and pGui:FindFirstChild("TopbarStandard")
+    local hold = tbs   and tbs:FindFirstChild("Holders")
+    local rgt  = hold  and hold:FindFirstChild("Right")
+    if not rgt then return nil, nil, "DIRECT(no-holder-right)" end
+
+    local requireClock = (CONFIG.TIMER_REQUIRE_CLOCK_EMOJI ~= false)
+    local bestSec, bestText, bestName, bestScore = nil, nil, nil, -1
+    local bestLabel, bestWidget = nil, nil
+    for _, widget in ipairs(rgt:GetChildren()) do
+        local ib   = widget:FindFirstChild("IconButton")
+        local menu = ib    and ib:FindFirstChild("Menu")
+        local spot = menu  and menu:FindFirstChild("IconSpot")
+        local cnt  = spot  and spot:FindFirstChild("Contents")
+        local cont = cnt   and cnt:FindFirstChild("IconLabelContainer")
+        local lbl  = cont  and cont:FindFirstChild("IconLabel")
+        if lbl and lbl.Text and lbl.Text ~= "" then
+            local sec = parseMMSS(lbl.Text)
+            if sec and (not requireClock or hasClockEmoji(lbl.Text)) then
+                local score = 1
+                if hasClockEmoji(lbl.Text) then score = score + 10 end
+                local lname = string.lower(widget.Name or "")
+                if string.find(lname, "time", 1, true)
+                   or string.find(lname, "timer", 1, true)
+                   or string.find(lname, "wave", 1, true) then
+                    score = score + 2
+                end
+                if score > bestScore then
+                    bestSec    = sec
+                    bestText   = lbl.Text
+                    bestName   = widget.Name
+                    bestScore  = score
+                    bestLabel  = lbl
+                    bestWidget = widget
+                end
+            end
+        end
+    end
+
+    if bestSec then
+        if CONFIG.TIMER_USE_WIDGET_CACHE ~= false then
+            local wasFirstLock = (cachedTimerLabel == nil)
+            cachedTimerLabel  = bestLabel
+            cachedTimerWidget = bestWidget
+            cachedTimerName   = tostring(bestName)
+            timerEverFound    = true
+            if wasFirstLock then
+                print(string.format(
+                    "[AutoPlaceV21] timer-cache LOCKED: widget=%s text=%q sec=%d (selanjutnya tidak ada scanning)",
+                    tostring(bestName), tostring(bestText), bestSec))
+            end
+        end
+        return bestSec, bestText, "WIDGET:" .. tostring(bestName)
+    end
+    if requireClock then return nil, nil, "DIRECT(no-clock-widget)" end
+    return nil, nil, "DIRECT(no-mm:ss)"
+end
+
+
+-- Fallback rekursif (cuma dipanggil kalau direct path gagal di game pertama)
+local function findTimerLabel(root, depth)
+    depth = depth or 0
+    if depth > 10 then return nil end
+    local requireClock = (CONFIG.TIMER_REQUIRE_CLOCK_EMOJI ~= false)
+    local best, bestScore = nil, -1
+    local ok, children = pcall(function() return root:GetChildren() end)
+    if not ok or not children then return nil end
+    for _, c in ipairs(children) do
+        local pass, isText = pcall(function() return c:IsA("TextLabel") end)
+        if pass and isText and c.Text and c.Text ~= "" then
+            local sec = parseMMSS(c.Text)
+            if sec and (not requireClock or hasClockEmoji(c.Text)) then
+                local score = 0
+                if c.Name == "IconLabel" then score = score + 5 end
+                local fn = ""
+                pcall(function() fn = c:GetFullName() end)
+                if string.find(fn, "Topbar", 1, true) then score = score + 3 end
+                if string.find(fn, "Widget", 1, true) then score = score + 1 end
+                if hasClockEmoji(c.Text) then score = score + 10 end
+                if score > bestScore then best, bestScore = c, score end
+            end
+        end
+        local childBest = findTimerLabel(c, depth + 1)
+        if childBest then
+            local sec = parseMMSS(childBest.Text)
+            if sec and (not requireClock or hasClockEmoji(childBest.Text)) then
+                local score = 0
+                if childBest.Name == "IconLabel" then score = score + 5 end
+                local fn = ""
+                pcall(function() fn = childBest:GetFullName() end)
+                if string.find(fn, "Topbar", 1, true) then score = score + 3 end
+                if string.find(fn, "Widget", 1, true) then score = score + 1 end
+                if hasClockEmoji(childBest.Text) then score = score + 10 end
+                if score > bestScore then best, bestScore = childBest, score end
+            end
+        end
+    end
+    return best
+end
+
+
+local function readTimerOnce()
+    timerScanCount = timerScanCount + 1
+    local requireClock = (CONFIG.TIMER_REQUIRE_CLOCK_EMOJI ~= false)
+
+    -- FAST-PATH: cache hit -> baca .Text saja, TIDAK ada scanning
+    if CONFIG.TIMER_USE_WIDGET_CACHE ~= false and isCachedTimerLabelAlive() then
+        local ok, sec, raw = pcall(function()
+            local txt = cachedTimerLabel.Text or ""
+            return parseMMSS(txt), txt
+        end)
+        if ok then return sec, raw, "CACHED:" .. tostring(cachedTimerName) end
+        invalidateTimerCache()  -- reference rusak
+    end
+
+    -- SLOW-PATH: cache miss -> cari widget pertama kali (biasanya 1x per session)
+    local ok, sec, raw, src = pcall(function()
+        local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pGui then return nil, nil, "NO_GUI" end
+        local s1, r1, src1 = tryDirectTimerPath(pGui)
+        if s1 then return s1, r1, src1 end
+        -- fallback rekursif
+        local lbl = findTimerLabel(pGui, 0)
+        if lbl and lbl.Text then
+            local sec2 = parseMMSS(lbl.Text)
+            if sec2 and (not requireClock or hasClockEmoji(lbl.Text)) then
+                if CONFIG.TIMER_USE_WIDGET_CACHE ~= false then
+                    cachedTimerLabel  = lbl
+                    cachedTimerWidget = lbl
+                    cachedTimerName   = "REC"
+                    timerEverFound    = true
+                end
+                return sec2, lbl.Text, "REC"
+            end
+        end
+        local lbl2 = findTimerLabel(CoreGui, 0)
+        if lbl2 and lbl2.Text then
+            local sec3 = parseMMSS(lbl2.Text)
+            if sec3 and (not requireClock or hasClockEmoji(lbl2.Text)) then
+                if CONFIG.TIMER_USE_WIDGET_CACHE ~= false then
+                    cachedTimerLabel  = lbl2
+                    cachedTimerWidget = lbl2
+                    cachedTimerName   = "COREGUI"
+                    timerEverFound    = true
+                end
+                return sec3, lbl2.Text, "COREGUI"
+            end
+        end
+        return nil, r1, src1 or "MISS"
+    end)
+    if not ok then return nil, nil, "ERROR" end
+    return sec, raw, src
+end
+
+
+-- ==========================================
+-- CASH READER
+-- ==========================================
+local function parseCashText(t)
+    if type(t) ~= "string" then return nil end
+    local cleaned = string.gsub(t, "[%s,$]", "")
+    local numStr, suf = string.match(cleaned, "^([%d%.]+)([KkMmBb]?)")
+    if not numStr then return nil end
+    local n = tonumber(numStr)
+    if not n then return nil end
+    if suf == "K" or suf == "k" then n = n * 1e3
+    elseif suf == "M" or suf == "m" then n = n * 1e6
+    elseif suf == "B" or suf == "b" then n = n * 1e9 end
+    return math.floor(n)
+end
+
+local function readCashOnce()
+    local ok, n, raw = pcall(function()
+        local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+        local gameGui = pGui    and pGui:FindFirstChild("GameGui")
+        local screen  = gameGui and gameGui:FindFirstChild("Screen")
+        local bottom  = screen  and screen:FindFirstChild("Bottom")
+        local curr    = bottom  and bottom:FindFirstChild("CurrencyDisplay")
+        local cash    = curr    and curr:FindFirstChild("CashDisplay")
+        local title   = cash    and cash:FindFirstChild("Title")
+        if not title or not title.Text then return nil, nil end
+        return parseCashText(title.Text), title.Text
+    end)
+    if not ok then return nil, nil end
+    return n, raw
+end
+
+local function getUnitPrice(unitName)
+    if not CONFIG.UNIT_PRICES then return 0 end
+    return CONFIG.UNIT_PRICES[unitName] or 0
+end
+
+local function canAfford(unitName)
+    if not CONFIG.REQUIRE_CASH_GATE then return true, 0 end
+    local price = getUnitPrice(unitName)
+    if price <= 0 then return true, 0 end
+    local need = price + (CONFIG.CASH_SAFETY_BUFFER or 0)
+    if lastCash < 0 then return true, need end
+    return (lastCash >= need), need
+end
+
+
+-- ==========================================
+-- WAVE READER (V21 simplified: hanya pola "Wave N")
+-- ==========================================
+-- V20 punya branch INCOMING & COUNTDOWN; V21 hapus karena tidak dipakai unlock.
+local function readWaveOnce()
+    local ok, num, raw = pcall(function()
+        local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+        local ggn     = pGui    and pGui:FindFirstChild("GameGuiNoInset")
+        local screen  = ggn     and ggn:FindFirstChild("Screen")
+        local top     = screen  and screen:FindFirstChild("Top")
+        local info    = top     and top:FindFirstChild("GameInfo")
+        local content = info    and info:FindFirstChild("Content")
+        local waves   = content and content:FindFirstChild("Waves")
+        local title   = waves   and waves:FindFirstChild("Title")
+        if not title or not title.Text or title.Text == "" then return nil, nil end
+        local t = title.Text
+        local waveNum = string.match(t, "[Ww][Aa][Vv][Ee]%s*(%d+)")
+        if waveNum then return tonumber(waveNum), t end
+        return nil, t
+    end)
+    if not ok then return nil, nil end
+    return num, raw
+end
+
+-- ==========================================
+-- UI READER (counter unit terpasang)
+-- ==========================================
+local function readPlacedUnits()
+    local ok, allUnits, target = pcall(function()
+        local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+        local gameGui = pGui    and pGui:FindFirstChild("GameGui")
+        local screen  = gameGui and gameGui:FindFirstChild("Screen")
+        local middle  = screen  and screen:FindFirstChild("Middle")
+        local unitMgr = middle  and middle:FindFirstChild("UnitManager")
+        local items1  = unitMgr and unitMgr:FindFirstChild("Items")
+        local frame   = items1  and items1:FindFirstChild("Frame")
+        local items2  = frame   and frame:FindFirstChild("Items")
+        local items3  = items2  and items2:FindFirstChild("Items")
+        local scroll  = items3  and items3:FindFirstChild("ScrollingFrame")
+        if not scroll then return 0, 0 end
+        local au, tg = 0, 0
+        for _, child in ipairs(scroll:GetChildren()) do
+            if startsWith(child.Name, "unit_") then
+                au = au + 1
+                if child.Name == CONFIG.TARGET_UNIT then tg = tg + 1 end
+            end
+        end
+        return au, tg
+    end)
+    if not ok then return 0, 0 end
+    return allUnits or 0, target or 0
+end
+
+local function refreshUICounts()
+    local au, tg = readPlacedUnits()
+    lastUIAllUnits    = au
+    lastUITargetCount = tg
+    local cnt = CONFIG.CAP_COUNT_ONLY_TARGET and tg or au
+    capReached = cnt >= CONFIG.PlacementUnitMaxCap
+end
+
+local function checkCapBeforePlacement()
+    refreshUICounts()
+    return capReached
+end
+
+
+-- Reconcile priority dari UI count (anti-stuck saat verify lag)
+local function reconcilePriorityFromUI()
+    if not CONFIG.PRIORITY_RECONCILE_UI then return end
+    if not CONFIG.PRIORITY_LOCK then return end
+    if #SLOTS_PRIORITY == 0 then return end
+    if lastUITargetCount < #SLOTS_PRIORITY then return end
+    local changed = false
+    for i = 1, #SLOTS_PRIORITY do
+        if not prioritySatisfied[i] then prioritySatisfied[i] = true; changed = true end
+    end
+    if changed and CONFIG.LOUD_PRIORITY then
+        print(string.format("[AutoPlaceV21] reconcilePriority: UI=%d >= P=%d -> all satisfied",
+            lastUITargetCount, #SLOTS_PRIORITY))
+    end
+end
+
+-- ==========================================
+-- GATES (V21: TIMER ONLY)
+-- ==========================================
+local function unlockGateOk()
+    if CONFIG.REQUIRE_PLACEMENT_GATE and not placementUnlocked then
+        return false, "menunggu TIMER@" .. (CONFIG.TIMER_UNLOCK_AT_SEC or 1) .. "s"
+    end
+    return true, "ok"
+end
+
+local function cashGateOk(unitName)
+    if not CONFIG.REQUIRE_CASH_GATE then return true, 0 end
+    local ok, need = canAfford(unitName or CONFIG.TARGET_UNIT)
+    if not ok then return false, need end
+    return true, need
+end
+
+local function canStartMainPhase()
+    local can, reason = unlockGateOk()
+    if not can then return false, reason end
+    if CONFIG.MAIN_REQUIRES_PRIORITY_OK and hasPendingPriority() then
+        return false, "menunggu priority done"
+    end
+    if CONFIG.MAIN_REQUIRES_PRIORITY_OK and hasGivenUpPriority() then
+        return false, "priority GIVEUP, main locked"
+    end
+    if lastWaveNum < 0 then return false, "menunggu wave terdeteksi" end
+    if lastWaveNum < CONFIG.MAIN_START_WAVE then
+        return false, string.format("menunggu wave >= %d (sekarang %d)",
+            CONFIG.MAIN_START_WAVE, lastWaveNum)
+    end
+    local okCash, need = cashGateOk(CONFIG.TARGET_UNIT)
+    if not okCash then return false, string.format("cash %d < %d", lastCash, need) end
+    return true, "ok"
+end
+
+
+-- ==========================================
+-- SHUFFLE-BAG  (priority, main, backup)
+-- ==========================================
+local function buildBag(n)
+    local bag = {}
+    for i = 1, n do bag[i] = i end
+    for i = n, 2, -1 do
+        local j = randInt(1, i)
+        bag[i], bag[j] = bag[j], bag[i]
+    end
+    return bag
+end
+local function refillMainBag()   mainBag   = buildBag(#SLOTS_MAIN)   end
+local function refillBackupBag() backupBag = buildBag(#SLOTS_BACKUP) end
+local function refillPriorityBag()
+    if CONFIG.PRIORITY_RANDOM_ORDER then
+        priorityBag = buildBag(#SLOTS_PRIORITY)
+    else
+        priorityBag = {}
+        for i = 1, #SLOTS_PRIORITY do priorityBag[i] = i end
+    end
+end
+
+local function selectNextPrioritySlot()
+    local n = #SLOTS_PRIORITY
+    local tries = 0
+    while #priorityBag > 0 and tries <= n do
+        tries = tries + 1
+        local idx = table.remove(priorityBag, 1)
+        if idx and not prioritySatisfied[idx] and not priorityGivenUp[idx]
+           and priorityAttempts[idx] < CONFIG.PRIORITY_MAX_TRIES then
+            return idx
+        end
+    end
+    if hasPendingPriority() then
+        refillPriorityBag()
+        while #priorityBag > 0 do
+            local idx = table.remove(priorityBag, 1)
+            if idx and not prioritySatisfied[idx] and not priorityGivenUp[idx]
+               and priorityAttempts[idx] < CONFIG.PRIORITY_MAX_TRIES then
+                return idx
+            end
+        end
+    end
+    return nil
+end
+
+
+local function initSlotState()
+    for i = 1, #SLOTS_PRIORITY do
+        prioritySatisfied[i]    = false
+        priorityAttempts[i]     = 0
+        priorityGivenUp[i]      = false
+        priorityGiveupCycles[i] = 0
+        priorityGiveupSince[i]  = 0
+    end
+    for i = 1, #SLOTS_MAIN do mainSatisfied[i] = false end
+    refillMainBag()
+    refillPriorityBag()
+    if #SLOTS_BACKUP > 0 then refillBackupBag() end
+    capReached        = false
+    lastUITargetCount = 0
+    lastUIAllUnits    = 0
+end
+initSlotState()
+
+local function performReset(reason)
+    initSlotState()
+    placementUnlocked     = false
+    unlockSource          = "-"
+    lastWaveNum           = -1
+    maxWaveSeen           = -1
+    placementsSinceUnlock = 0
+    -- (V19+) cache widget timer SENGAJA TIDAK di-invalidate (persistent lintas game)
+    if CONFIG.TIMER_PERSIST_CACHE_ACROSS_RESET == false then
+        invalidateTimerCache()
+        timerEverFound = false
+    end
+    lastTimerSec = -1
+    lastTimerRaw = "-"
+    gameCount    = gameCount + 1
+    lastResetAt  = os.clock()
+    pausedUntil  = os.clock() + CONFIG.RESET_COOLDOWN
+    currentPhase = "reset (cooldown)"
+    pendingReset = false
+    lastResult   = string.format("RESET game #%d: %s", gameCount, tostring(reason))
+    print(string.format("[AutoPlaceV21] === RESET === game #%d | reason: %s | timer-cache=%s",
+        gameCount, tostring(reason),
+        (cachedTimerLabel and ("KEEP("..tostring(cachedTimerName)..")") or "none")))
+end
+
+
+-- ==========================================
+-- GUI
+-- ==========================================
+if CoreGui:FindFirstChild("AutoPlaceGUI") then CoreGui.AutoPlaceGUI:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoPlaceGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 380, 0, 470)
+MainFrame.Position = UDim2.new(0.5, -190, 0.5, -235)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Place V21 (Lean: Timer-only Unlock @ T-1s)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.ClipsDescendants = true
+ContentFrame.Parent = MainFrame
+
+local PhaseBanner = Instance.new("TextLabel")
+PhaseBanner.Size = UDim2.new(0.95, 0, 0, 32)
+PhaseBanner.Position = UDim2.new(0.025, 0, 0, 6)
+PhaseBanner.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
+PhaseBanner.Text = "BOOTING..."
+PhaseBanner.TextColor3 = Color3.fromRGB(0, 0, 0)
+PhaseBanner.Font = Enum.Font.GothamBlack
+PhaseBanner.TextSize = 14
+PhaseBanner.Parent = ContentFrame
+Instance.new("UICorner", PhaseBanner).CornerRadius = UDim.new(0, 6)
+
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.4, 0, 0, 28)
+ToggleBtn.Position = UDim2.new(0.025, 0, 0, 44)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 12
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = ContentFrame
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local RotBtn = Instance.new("TextButton")
+RotBtn.Size = UDim2.new(0.27, 0, 0, 28)
+RotBtn.Position = UDim2.new(0.435, 0, 0, 44)
+RotBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+RotBtn.Text = "Rot: " .. CONFIG.ROTATION_MODE
+RotBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+RotBtn.Font = Enum.Font.Gotham
+RotBtn.TextSize = 11
+RotBtn.Parent = ContentFrame
+Instance.new("UICorner", RotBtn).CornerRadius = UDim.new(0, 6)
+
+local ResetBtn = Instance.new("TextButton")
+ResetBtn.Size = UDim2.new(0.27, 0, 0, 28)
+ResetBtn.Position = UDim2.new(0.715, 0, 0, 44)
+ResetBtn.BackgroundColor3 = Color3.fromRGB(180, 110, 60)
+ResetBtn.Text = "Reset Slots"
+ResetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ResetBtn.Font = Enum.Font.GothamBold
+ResetBtn.TextSize = 11
+ResetBtn.Parent = ContentFrame
+Instance.new("UICorner", ResetBtn).CornerRadius = UDim.new(0, 6)
+
+
+local PrioListLbl = Instance.new("TextLabel")
+PrioListLbl.Size = UDim2.new(1, -20, 0, 30)
+PrioListLbl.Position = UDim2.new(0, 10, 0, 80)
+PrioListLbl.BackgroundTransparency = 1
+PrioListLbl.Text = "Priority: -"
+PrioListLbl.TextColor3 = Color3.fromRGB(255, 220, 130)
+PrioListLbl.Font = Enum.Font.Gotham
+PrioListLbl.TextSize = 11
+PrioListLbl.TextWrapped = true
+PrioListLbl.TextXAlignment = Enum.TextXAlignment.Left
+PrioListLbl.TextYAlignment = Enum.TextYAlignment.Top
+PrioListLbl.Parent = ContentFrame
+
+local PlacedLbl = Instance.new("TextLabel")
+PlacedLbl.Size = UDim2.new(1, -20, 0, 14)
+PlacedLbl.Position = UDim2.new(0, 10, 0, 116)
+PlacedLbl.BackgroundTransparency = 1
+PlacedLbl.Text = "Placed: 0/20"
+PlacedLbl.TextColor3 = Color3.fromRGB(160, 230, 200)
+PlacedLbl.Font = Enum.Font.GothamBold
+PlacedLbl.TextSize = 12
+PlacedLbl.TextXAlignment = Enum.TextXAlignment.Left
+PlacedLbl.Parent = ContentFrame
+
+local StatsLbl = Instance.new("TextLabel")
+StatsLbl.Size = UDim2.new(1, -20, 0, 14)
+StatsLbl.Position = UDim2.new(0, 10, 0, 132)
+StatsLbl.BackgroundTransparency = 1
+StatsLbl.Text = "OK P:0 M:0 B:0  |  Fail P:0 M:0 B:0"
+StatsLbl.TextColor3 = Color3.fromRGB(180, 200, 220)
+StatsLbl.Font = Enum.Font.Gotham
+StatsLbl.TextSize = 11
+StatsLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatsLbl.Parent = ContentFrame
+
+
+local WaveLbl = Instance.new("TextLabel")
+WaveLbl.Size = UDim2.new(1, -20, 0, 14)
+WaveLbl.Position = UDim2.new(0, 10, 0, 148)
+WaveLbl.BackgroundTransparency = 1
+WaveLbl.Text = "Wave: -"
+WaveLbl.TextColor3 = Color3.fromRGB(220, 200, 180)
+WaveLbl.Font = Enum.Font.Gotham
+WaveLbl.TextSize = 11
+WaveLbl.TextXAlignment = Enum.TextXAlignment.Left
+WaveLbl.Parent = ContentFrame
+
+local UnlockLbl = Instance.new("TextLabel")
+UnlockLbl.Size = UDim2.new(1, -20, 0, 14)
+UnlockLbl.Position = UDim2.new(0, 10, 0, 164)
+UnlockLbl.BackgroundTransparency = 1
+UnlockLbl.Text = "Placement: LOCKED"
+UnlockLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+UnlockLbl.Font = Enum.Font.GothamBold
+UnlockLbl.TextSize = 11
+UnlockLbl.TextXAlignment = Enum.TextXAlignment.Left
+UnlockLbl.Parent = ContentFrame
+
+local TimerLbl = Instance.new("TextLabel")
+TimerLbl.Size = UDim2.new(1, -20, 0, 14)
+TimerLbl.Position = UDim2.new(0, 10, 0, 180)
+TimerLbl.BackgroundTransparency = 1
+TimerLbl.Text = "Timer: Scanning..."
+TimerLbl.TextColor3 = Color3.fromRGB(255, 230, 130)
+TimerLbl.Font = Enum.Font.GothamBold
+TimerLbl.TextSize = 11
+TimerLbl.TextXAlignment = Enum.TextXAlignment.Left
+TimerLbl.TextWrapped = false
+TimerLbl.ClipsDescendants = true
+TimerLbl.Parent = ContentFrame
+
+local CashLbl = Instance.new("TextLabel")
+CashLbl.Size = UDim2.new(1, -20, 0, 14)
+CashLbl.Position = UDim2.new(0, 10, 0, 196)
+CashLbl.BackgroundTransparency = 1
+CashLbl.Text = "Cash: -"
+CashLbl.TextColor3 = Color3.fromRGB(140, 230, 140)
+CashLbl.Font = Enum.Font.GothamBold
+CashLbl.TextSize = 11
+CashLbl.TextXAlignment = Enum.TextXAlignment.Left
+CashLbl.Parent = ContentFrame
+
+
+local WaveRawLbl = Instance.new("TextLabel")
+WaveRawLbl.Size = UDim2.new(1, -20, 0, 14)
+WaveRawLbl.Position = UDim2.new(0, 10, 0, 212)
+WaveRawLbl.BackgroundTransparency = 1
+WaveRawLbl.Text = "WaveTxt: -"
+WaveRawLbl.TextColor3 = Color3.fromRGB(150, 170, 200)
+WaveRawLbl.Font = Enum.Font.Gotham
+WaveRawLbl.TextSize = 10
+WaveRawLbl.TextXAlignment = Enum.TextXAlignment.Left
+WaveRawLbl.Parent = ContentFrame
+
+local GameLbl = Instance.new("TextLabel")
+GameLbl.Size = UDim2.new(1, -20, 0, 14)
+GameLbl.Position = UDim2.new(0, 10, 0, 228)
+GameLbl.BackgroundTransparency = 1
+GameLbl.Text = "Game #1  |  Last reset: -"
+GameLbl.TextColor3 = Color3.fromRGB(220, 180, 220)
+GameLbl.Font = Enum.Font.Gotham
+GameLbl.TextSize = 11
+GameLbl.TextXAlignment = Enum.TextXAlignment.Left
+GameLbl.Parent = ContentFrame
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.new(1, -20, 0, 130)
+StatusLbl.Position = UDim2.new(0, 10, 0, 246)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text = "Last: -"
+StatusLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.TextWrapped = true
+StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+StatusLbl.Parent = ContentFrame
+
+
+-- ==========================================
+-- HELPERS GUI
+-- ==========================================
+local function isBackupActive()
+    if not CONFIG.USE_BACKUP then return false end
+    if #SLOTS_BACKUP == 0 then return false end
+    if lastWaveNum < CONFIG.BACKUP_AFTER_WAVE then return false end
+    return true
+end
+local function setBanner(text, bgColor)
+    PhaseBanner.Text = text
+    if bgColor then PhaseBanner.BackgroundColor3 = bgColor end
+end
+local function fmtTime(t)
+    if t <= 0 then return "-" end
+    return string.format("%.1fs ago", os.clock() - t)
+end
+local function fmtTimer(sec)
+    if not sec or sec < 0 then return "-" end
+    if sec < 60 then return tostring(sec) end
+    local m = math.floor(sec / 60)
+    local s = sec % 60
+    return string.format("%d:%02d", m, s)
+end
+
+local function refreshStats()
+    local lines = {}
+    for i = 1, #SLOTS_PRIORITY do
+        local mark
+        if prioritySatisfied[i] then mark = "OK"
+        elseif priorityGivenUp[i] then mark = "GIVEUP" .. (priorityGiveupCycles[i] and ("("..priorityGiveupCycles[i]..")") or "")
+        elseif priorityAttempts[i] >= CONFIG.PRIORITY_MAX_TRIES then mark = "GIVEUP"
+        else mark = "trying(" .. priorityAttempts[i] .. ")" end
+        lines[#lines + 1] = "P" .. i .. ":" .. mark
+    end
+    PrioListLbl.Text = "Priority(random):  " .. table.concat(lines, "  ")
+
+    local cnt, lbl
+    if CONFIG.CAP_COUNT_ONLY_TARGET then
+        cnt = lastUITargetCount; lbl = CONFIG.TARGET_UNIT
+    else
+        cnt = lastUIAllUnits; lbl = "all units"
+    end
+    local capStr = string.format("%d/%d  %s", cnt, CONFIG.PlacementUnitMaxCap, lbl)
+    if capReached then capStr = capStr .. "  [CAP]" end
+    PlacedLbl.Text = "Placed: " .. capStr
+
+    StatsLbl.Text = string.format("OK P:%d M:%d B:%d  |  Fail P:%d M:%d B:%d",
+        stats.ok_p, stats.ok_m, stats.ok_b,
+        stats.fail_p, stats.fail_m, stats.fail_b)
+
+    local backupTxt = isBackupActive() and "ACTIVE" or "idle"
+    WaveLbl.Text = string.format("Wave: %s  |  Gate>=%d  Backup:%s",
+        (lastWaveNum >= 0 and tostring(lastWaveNum) or "-"),
+        CONFIG.MAIN_START_WAVE or 1, backupTxt)
+
+
+    if placementUnlocked then
+        local burstTag = inBurstMode()
+            and string.format(" [BURST %d/%d]", placementsSinceUnlock, CONFIG.FAST_PLACE_FIRST_N)
+            or ""
+        UnlockLbl.Text       = "Placement: UNLOCKED via " .. unlockSource .. burstTag
+        UnlockLbl.TextColor3 = Color3.fromRGB(150, 230, 150)
+    else
+        UnlockLbl.Text       = "Placement: LOCKED (waiting TIMER@" .. (CONFIG.TIMER_UNLOCK_AT_SEC or 1) .. "s)"
+        UnlockLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+    end
+
+    if cachedTimerLabel and lastTimerSec >= 0 then
+        TimerLbl.Text       = "Timer: " .. fmtTimer(lastTimerSec)
+        TimerLbl.TextColor3 = Color3.fromRGB(255, 230, 130)
+    elseif lastTimerSec >= 0 then
+        TimerLbl.Text       = "Timer: " .. fmtTimer(lastTimerSec)
+        TimerLbl.TextColor3 = Color3.fromRGB(255, 230, 130)
+    else
+        TimerLbl.Text       = "Timer: Scanning..."
+        TimerLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+    end
+
+    local price = getUnitPrice(CONFIG.TARGET_UNIT)
+    if CONFIG.REQUIRE_CASH_GATE and price > 0 then
+        CashLbl.Text = string.format("Cash: %s  /  need %d  (priority bypass cash)",
+            (lastCash >= 0 and tostring(lastCash) or "-"), price)
+        if lastCash >= 0 and lastCash < price then
+            CashLbl.TextColor3 = Color3.fromRGB(255, 180, 100)
+        else
+            CashLbl.TextColor3 = Color3.fromRGB(140, 230, 140)
+        end
+    else
+        CashLbl.Text = string.format("Cash: %s  (gate off)",
+            (lastCash >= 0 and tostring(lastCash) or "-"))
+        CashLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+    end
+
+    WaveRawLbl.Text = "WaveTxt: " .. tostring(lastWaveTextRaw)
+    GameLbl.Text    = string.format("Game #%d  |  Last reset: %s",
+        gameCount, fmtTime(lastResetAt))
+    StatusLbl.Text  = "Last: " .. tostring(lastResult)
+end
+
+print("[AutoPlaceV21] GUI built")
+
+
+-- ==========================================
+-- DRAG SYSTEM  (V22: connection di-track supaya bisa di-disconnect saat Close)
+-- ==========================================
+local dragging, dragInput, dragStart, startPos
+trackConn(TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        trackConn(input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end))
+    end
+end))
+trackConn(TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end))
+trackConn(UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end))
+
+-- ==========================================
+-- BUTTONS
+-- ==========================================
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentFrame.Visible = not minimized
+    MainFrame.Size = minimized and UDim2.new(0, 380, 0, 30) or UDim2.new(0, 380, 0, 470)
+end)
+CloseBtn.MouseButton1Click:Connect(function()
+    -- [V22] Close benar-benar mematikan script:
+    isRunning = false
+    -- (1) Invalidate token global -> semua loop while isAlive() exit di iterasi berikutnya
+    if _G.__AutoPlace_ACTIVE_ID == SCRIPT_ID then
+        _G.__AutoPlace_ACTIVE_ID = nil
+    end
+    -- (2) Putus semua connection RBXScript supaya tidak ada handler nyangkut
+    pcall(disconnectAllConns)
+    -- (3) Hapus GUI
+    pcall(function() ScreenGui:Destroy() end)
+    print("[AutoPlaceV22] CloseBtn pressed -> instance terminated.")
+end)
+
+local function setScriptState(state)
+    isRunning = state
+    if isRunning then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(80, 200, 80)
+        ToggleBtn.Text = "Status: ON"
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+        ToggleBtn.Text = "Status: OFF"
+    end
+end
+ToggleBtn.MouseButton1Click:Connect(function() setScriptState(not isRunning) end)
+
+
+local ROT_MODES = { "step90", "smooth", "fixed", "off" }
+local function nextRotMode(cur)
+    for i = 1, #ROT_MODES do
+        if ROT_MODES[i] == cur then return ROT_MODES[(i % #ROT_MODES) + 1] end
+    end
+    return ROT_MODES[1]
+end
+RotBtn.MouseButton1Click:Connect(function()
+    CONFIG.ROTATION_MODE = nextRotMode(CONFIG.ROTATION_MODE)
+    RotBtn.Text = "Rot: " .. CONFIG.ROTATION_MODE
+end)
+ResetBtn.MouseButton1Click:Connect(function()
+    pendingReset = true
+    print("[AutoPlaceV21] Manual reset requested by user.")
+end)
+
+-- ==========================================
+-- ROTATION & ARGS
+-- ==========================================
+local function pickRotationDeg()
+    local m = CONFIG.ROTATION_MODE
+    if m == "off"    then return 0 end
+    if m == "fixed"  then return CONFIG.FIXED_ROT_DEG or 0 end
+    if m == "smooth" then return randFloat(0, 360) end
+    local steps = { 0, 90, 180, 270 }
+    return steps[randInt(1, 4)]
+end
+local function buildArgs(slotXYZ)
+    local off = CONFIG.POSITION_OFFSET or 0
+    local dx, dz = 0, 0
+    if off > 0 then dx = randFloat(-off, off); dz = randFloat(-off, off) end
+    local x = slotXYZ[1] + dx
+    local y = slotXYZ[2]
+    local z = slotXYZ[3] + dz
+    local rotDeg = pickRotationDeg()
+    local cf  = CFrame.new(x, y, z) * CFrame.Angles(0, math.rad(rotDeg), 0)
+    local pos = Vector3.new(x, y, z)
+    local args = {
+        CONFIG.TARGET_UNIT,
+        { CF = cf, Rotation = rotDeg, Valid = true, Position = pos }
+    }
+    return args, rotDeg
+end
+
+
+-- ==========================================
+-- PLACEMENT REMOTE
+-- ==========================================
+local placeUnitRemote
+local function getPlaceUnitRemote()
+    if placeUnitRemote and placeUnitRemote.Parent then return placeUnitRemote end
+    local rf = ReplicatedStorage:FindFirstChild("RemoteFunctions")
+    if rf then placeUnitRemote = rf:FindFirstChild("PlaceUnit") end
+    return placeUnitRemote
+end
+local function isSuccessReturn(ok, ret)
+    if not ok then return false end
+    if ret == false then return false end
+    if type(ret) == "string" then
+        local low = strLower(ret)
+        if strContains(low, "fail") then return false end
+        if strContains(low, "insufficient") then return false end
+        if strContains(low, "not enough") then return false end
+        if strContains(low, "cannot") then return false end
+        if strContains(low, "error") then return false end
+    end
+    if type(ret) == "table" and ret.success == false then return false end
+    return true
+end
+
+-- ==========================================
+-- PRIORITY PLACEMENT (no cash gate, instant burst saat unlock T-1s)
+-- ==========================================
+local function placePrioritySlot(idx)
+    if CONFIG.REQUIRE_PLACEMENT_GATE and not placementUnlocked then
+        if CONFIG.DEBUG_GATE then
+            print("[AutoPlaceV21] [GATE BLOCKED priority] placement locked")
+        end
+        lastResult = "GATE BLOCKED: placement locked"
+        return false
+    end
+    local remote = getPlaceUnitRemote()
+    if not remote then return false, "remote belum ready" end
+    if checkCapBeforePlacement() then
+        lastResult = "cap reached, abort priority"
+        return false
+    end
+
+    local burst = inBurstMode()
+    local _, beforeTarget = readPlacedUnits()
+    priorityAttempts[idx] = priorityAttempts[idx] + 1
+    local args, rotDeg = buildArgs(SLOTS_PRIORITY[idx])
+    local ok, ret = pcall(function() return remote:InvokeServer(_unpack(args)) end)
+    local serverOk = isSuccessReturn(ok, ret)
+
+
+    local doVerify = CONFIG.PRIORITY_VERIFY_UI and not (burst and CONFIG.FAST_PLACE_SKIP_VERIFY)
+    local success
+    if doVerify then
+        task.wait(CONFIG.PRIORITY_VERIFY_WAIT or 0.1)
+        local _, afterTarget = readPlacedUnits()
+        success = serverOk and (afterTarget > beforeTarget)
+        lastUITargetCount = afterTarget
+    else
+        success = serverOk
+    end
+
+    local detail = string.format("[P%d try=%d] rot=%s ret=%s ui=%d burst=%s",
+        idx, priorityAttempts[idx], tostring(rotDeg), tostring(ret),
+        lastUITargetCount, tostring(burst))
+
+    if success then
+        prioritySatisfied[idx]  = true
+        priorityGivenUp[idx]    = false
+        stats.placed_p          = stats.placed_p + 1
+        stats.ok_p              = stats.ok_p + 1
+        placementsSinceUnlock   = placementsSinceUnlock + 1
+        lastResult              = "OK " .. detail
+        if CONFIG.LOUD_PRIORITY then print("[AutoPlaceV21] [PRIORITY OK] " .. detail) end
+        return true
+    else
+        if priorityAttempts[idx] >= CONFIG.PRIORITY_MAX_TRIES then
+            stats.placed_p           = stats.placed_p + 1
+            stats.fail_p             = stats.fail_p + 1
+            priorityGivenUp[idx]     = true
+            priorityGiveupSince[idx] = os.clock()
+            lastResult               = "FAIL (giveup -> main lanjut) " .. detail
+            warn(string.format("[AutoPlaceV21] [PRIORITY GIVEUP] P%d after %d tries",
+                idx, priorityAttempts[idx]))
+        else
+            stats.fail_p = stats.fail_p + 1
+            lastResult   = "fail " .. detail
+            if CONFIG.LOUD_PRIORITY and (priorityAttempts[idx] % 5 == 1) then
+                print("[AutoPlaceV21] [priority retry] " .. detail)
+            end
+        end
+        return false
+    end
+end
+
+
+-- ==========================================
+-- MAIN/BACKUP PLACEMENT
+-- ==========================================
+local function selectMainOrBackup()
+    if isBackupActive() and math.random() < CONFIG.BACKUP_CHANCE then
+        if #backupBag == 0 then refillBackupBag() end
+        local idx = table.remove(backupBag, 1)
+        return "B", idx, SLOTS_BACKUP[idx]
+    end
+    local pendingList = {}
+    for i = 1, #SLOTS_MAIN do
+        if not mainSatisfied[i] then pendingList[#pendingList + 1] = i end
+    end
+    if #pendingList > 0 then
+        local idx = pendingList[randInt(1, #pendingList)]
+        return "M", idx, SLOTS_MAIN[idx]
+    end
+    if #mainBag == 0 then refillMainBag() end
+    local idx = table.remove(mainBag, 1)
+    return "M", idx, SLOTS_MAIN[idx]
+end
+
+local function placeMainOrBackupOnce()
+    if CONFIG.REQUIRE_PLACEMENT_GATE and not placementUnlocked then
+        lastResult = "GATE BLOCKED: placement locked"
+        return false
+    end
+    if CONFIG.MAIN_REQUIRES_PRIORITY_OK and hasPendingPriority() then return false end
+    if lastWaveNum < CONFIG.MAIN_START_WAVE then return false end
+    if CONFIG.REQUIRE_CASH_GATE then
+        local okCash, need = canAfford(CONFIG.TARGET_UNIT)
+        if not okCash then
+            lastResult = string.format("WAIT cash %d < %d (M)", lastCash, need)
+            return false
+        end
+    end
+    local remote = getPlaceUnitRemote()
+    if not remote then return false, "remote belum ready" end
+    if checkCapBeforePlacement() then
+        lastResult = "cap reached, abort main"
+        return false
+    end
+
+    local phaseTag, slotIdx, slotXYZ = selectMainOrBackup()
+    local args, rotDeg = buildArgs(slotXYZ)
+    local ok, ret = pcall(function() return remote:InvokeServer(_unpack(args)) end)
+    local success = isSuccessReturn(ok, ret)
+    local detail  = string.format("[%s%d] rot=%s ret=%s",
+        phaseTag, slotIdx, tostring(rotDeg), tostring(ret))
+
+
+    if success then
+        if phaseTag == "M" then
+            mainSatisfied[slotIdx] = true
+            stats.placed_m = stats.placed_m + 1
+            stats.ok_m     = stats.ok_m + 1
+        else
+            stats.placed_b = stats.placed_b + 1
+            stats.ok_b     = stats.ok_b + 1
+        end
+        placementsSinceUnlock = placementsSinceUnlock + 1
+    else
+        if phaseTag == "M" then
+            stats.placed_m = stats.placed_m + 1
+            stats.fail_m   = stats.fail_m + 1
+        else
+            stats.placed_b = stats.placed_b + 1
+            stats.fail_b   = stats.fail_b + 1
+        end
+    end
+    lastResult = (success and "OK " or "FAIL ") .. detail
+    return success
+end
+
+
+-- ==========================================
+-- OBSERVERS  (V21: timer-only unlock + simple wave reset)
+-- ==========================================
+local function processTimerSnapshot(sec, raw, src)
+    if raw then lastTimerRaw = raw end
+    if src then lastTimerSrc = src end
+
+    if CONFIG.DEBUG_TIMER and (os.clock() - timerDebugAt) > 1.0 then
+        timerDebugAt = os.clock()
+        print(string.format("[AutoPlaceV21][TIMER] sec=%s raw=%s src=%s",
+            tostring(sec), tostring(raw), tostring(src)))
+    end
+    if not sec then return end
+
+    -- Reset detect: timer melonjak naik (game baru / round reset)
+    if CONFIG.AUTO_RESET and CONFIG.DETECT_TIMER_RESET
+       and lastTimerSec >= 0
+       and sec >= lastTimerSec + (CONFIG.TIMER_RESET_JUMP or 60) then
+        print(string.format("[AutoPlaceV21] timer reset %d -> %d, restart!",
+            lastTimerSec, sec))
+        pendingReset = true
+        lastTimerSec = sec
+        return
+    end
+    lastTimerSec = sec
+
+    -- (V21 INTI) UNLOCK + INSTANT TRIGGER PRIORITY di T-1s.
+    --   Begitu sec <= TIMER_UNLOCK_AT_SEC (default 1) dan sec > 0,
+    --   placement langsung dibuka. Slot priority akan di-fire instant
+    --   karena placementsSinceUnlock=0 -> burst mode aktif (FAST_PLACE_FIRST_N).
+    if not placementUnlocked and sec >= 1 and sec <= (CONFIG.TIMER_UNLOCK_AT_SEC or 1) then
+        placementUnlocked     = true
+        placementsSinceUnlock = 0
+        unlockSource          = string.format("TIMER@%ds", sec)
+        print(string.format(
+            "[AutoPlaceV21] PLACEMENT UNLOCKED via TIMER@%ds (instant priority burst armed)",
+            sec))
+        return
+    end
+
+    -- Mid-game fallback: kalau saat boot timer udah melewati TIMER_UNLOCK_AT_SEC
+    -- (mis. join di tengah game), tetap unlock pertama kali timer ke-baca > 0.
+    if not placementUnlocked and bootCompleted and sec > 0 then
+        placementUnlocked     = true
+        placementsSinceUnlock = 0
+        unlockSource          = string.format("TIMER_FALLBACK@%ds", sec)
+        print(string.format(
+            "[AutoPlaceV21] PLACEMENT UNLOCKED via TIMER_FALLBACK@%ds (mid-game join)",
+            sec))
+    end
+end
+
+
+local function processWaveSnapshot(num, rawText)
+    if rawText then lastWaveTextRaw = rawText end
+    if not num then return end
+    -- (V21) wave hanya valid SETELAH placementUnlocked, anti baca wave saat lobby
+    if not placementUnlocked then return end
+
+    if num ~= lastWaveNum then
+        local prev = lastWaveNum
+        lastWaveNum = num
+        if num > maxWaveSeen then maxWaveSeen = num end
+
+        -- Reset detect: wave decrease
+        if CONFIG.AUTO_RESET and CONFIG.DETECT_WAVE_DECREASE
+           and prev > 0 and num < prev and prev >= 2 then
+            print(string.format("[AutoPlaceV21] wave decrease %d -> %d, restart!", prev, num))
+            pendingReset = true
+            maxWaveSeen = num
+            return
+        end
+
+        if num == CONFIG.START_WAVE and not isRunning then
+            print("[AutoPlaceV21] Reach START_WAVE -> ON")
+            setScriptState(true)
+        elseif num == CONFIG.STOP_WAVE and isRunning then
+            print("[AutoPlaceV21] Reach STOP_WAVE -> OFF")
+            setScriptState(false)
+        end
+    end
+end
+
+
+-- ==========================================
+-- BACKGROUND LOOPS  (V22: semua while-loop cek isAlive() -> bisa exit total)
+-- ==========================================
+task.spawn(function()
+    while isAlive() do
+        if CONFIG.WAVE_CONTROL then
+            local num, raw = readWaveOnce()
+            processWaveSnapshot(num, raw)
+        end
+        task.wait(CONFIG.WAVE_POLL or 0.05)
+    end
+    print("[AutoPlaceV22] wave-loop EXITED (instance invalidated)")        -- penanda loop bener2 mati
+end)
+
+task.spawn(function()
+    while isAlive() do
+        local sec, raw, src = readTimerOnce()
+        processTimerSnapshot(sec, raw, src)
+        -- Initial fast-scans: TIMER_INITIAL_FAST_SCANS pertama dijalankan rapid
+        -- supaya widget timer ⏱ cepat ketemu. Setelah itu pakai TIMER_POLL normal.
+        local fastN  = CONFIG.TIMER_INITIAL_FAST_SCANS or 0
+        local fastDt = CONFIG.TIMER_INITIAL_FAST_INTERVAL or 0.02
+        if (not timerEverFound) and timerScanCount <= fastN then
+            task.wait(fastDt)
+        else
+            task.wait(CONFIG.TIMER_POLL or 0.05)
+        end
+    end
+    print("[AutoPlaceV22] timer-loop EXITED (instance invalidated)")
+end)
+
+task.spawn(function()
+    while isAlive() do
+        local n, raw = readCashOnce()
+        if n ~= nil then
+            lastCash    = n
+            lastCashRaw = raw or tostring(n)
+        end
+        task.wait(0.10)
+    end
+    print("[AutoPlaceV22] cash-loop EXITED (instance invalidated)")
+end)
+
+task.spawn(function()
+    while isAlive() do
+        task.wait(CONFIG.UI_POLL or 0.25)
+        pcall(refreshUICounts)
+    end
+    print("[AutoPlaceV22] ui-loop EXITED (instance invalidated)")
+end)
+
+
+-- ==========================================
+-- MAIN ORCHESTRATOR
+-- ==========================================
+refreshStats()
+
+task.spawn(function()
+    if CONFIG.BOOT_DELAY and CONFIG.BOOT_DELAY > 0 then
+        setBanner("BOOT DELAY... " .. CONFIG.BOOT_DELAY .. "s",
+            Color3.fromRGB(255, 165, 0))
+        task.wait(CONFIG.BOOT_DELAY)
+    end
+
+    -- Boot phase: tunggu unlock via TIMER@T-1s
+    if CONFIG.WAVE_CONTROL and CONFIG.REQUIRE_PLACEMENT_GATE then
+        setBanner("WAIT TIMER@" .. (CONFIG.TIMER_UNLOCK_AT_SEC or 1) .. "s ...",
+            Color3.fromRGB(255, 200, 100))
+        local startT = os.clock()
+        while not placementUnlocked
+              and (os.clock() - startT) < CONFIG.WAVE_BOOT_TIMEOUT do
+            local sec, traw, tsrc = readTimerOnce()
+            processTimerSnapshot(sec, traw, tsrc)
+            local num, raw = readWaveOnce()
+            processWaveSnapshot(num, raw)
+            refreshStats()
+            task.wait(0.03)
+        end
+        if not placementUnlocked then
+            warn(string.format(
+                "[AutoPlaceV21] Timer belum nyentuh %ds setelah %.1fs (mid-game fallback armed).",
+                CONFIG.TIMER_UNLOCK_AT_SEC or 1, CONFIG.WAVE_BOOT_TIMEOUT))
+        else
+            print("[AutoPlaceV21] Placement ready (" .. unlockSource .. ")")
+        end
+        bootCompleted = true
+    end
+
+
+    while isAlive() do                                                    -- V22: cek instance setiap iterasi
+        if pendingReset then
+            performReset("auto/manual")
+            setBanner("RESET cooldown...", Color3.fromRGB(255, 165, 0))
+            refreshStats()
+            task.wait(CONFIG.RESET_COOLDOWN)
+        end
+        pcall(refreshUICounts)
+        pcall(reconcilePriorityFromUI)
+        pcall(recoverGiveupPrioritySlots)
+
+        if os.clock() < pausedUntil then
+            task.wait(0.05)
+
+        elseif not isRunning then
+            currentPhase = "paused"
+            setBanner("PAUSED (Status: OFF)", Color3.fromRGB(180, 180, 180))
+            task.wait(0.3)
+
+        elseif capReached then
+            currentPhase = "cap-reached"
+            local cnt = CONFIG.CAP_COUNT_ONLY_TARGET and lastUITargetCount or lastUIAllUnits
+            setBanner(string.format("CAP REACHED: %d/%d", cnt, CONFIG.PlacementUnitMaxCap),
+                Color3.fromRGB(120, 220, 120))
+            refreshStats()
+            task.wait(1.0)
+
+        else
+            local unlockOk, gateReason = unlockGateOk()
+            if not unlockOk then
+                currentPhase = "locked"
+                setBanner("LOCKED: " .. gateReason, Color3.fromRGB(255, 100, 100))
+                refreshStats()
+                task.wait(0.10)
+            else
+                local pendingP   = hasPendingPriority()
+                local waveReady  = (lastWaveNum >= CONFIG.MAIN_START_WAVE)
+                local doPriority = false
+                if pendingP then
+                    if not waveReady then
+                        doPriority = true
+                    elseif CONFIG.MAIN_REQUIRES_PRIORITY_OK then
+                        doPriority = true
+                    elseif not CONFIG.MAIN_FORCE_AFTER_WAVE then
+                        doPriority = true
+                    else
+                        local p = CONFIG.PRIORITY_INTERLEAVE_CHANCE or 0.25
+                        if p > 0 and math.random() < p then doPriority = true end
+                    end
+                end
+
+
+                if doPriority then
+                    currentPhase = "priority (RANDOM)"
+                    local target = selectNextPrioritySlot()
+                    if target then
+                        local burst = inBurstMode()
+                        setBanner(string.format("PRIORITY P%d  (try %d) [RANDOM]%s",
+                            target, priorityAttempts[target] + 1,
+                            burst and "  [BURST]" or ""),
+                            burst and Color3.fromRGB(255, 240, 80)
+                                  or  Color3.fromRGB(255, 220, 100))
+                        local pOk = pcall(placePrioritySlot, target)
+                        refreshStats()
+                        local d
+                        if not pOk or not prioritySatisfied[target] then
+                            d = CONFIG.PRIORITY_FAIL_DELAY or 0.15
+                        elseif burst then
+                            d = CONFIG.FAST_PLACE_DELAY or 0
+                        else
+                            d = CONFIG.PRIORITY_DELAY or 0.1
+                        end
+                        safeYield(d)
+                    else
+                        task.wait(0.05)
+                    end
+
+                elseif waveReady then
+                    local canMain, reason = canStartMainPhase()
+                    if not canMain then
+                        currentPhase = "waiting-gate"
+                        setBanner("WAIT: " .. reason, Color3.fromRGB(255, 200, 100))
+                        refreshStats()
+                        task.wait(0.15)
+                    else
+                        local burst = inBurstMode()
+                        local pTag  = hasGivenUpPriority() and " (P-giveup)" or ""
+                        if isBackupActive() then
+                            currentPhase = "main+backup"
+                            setBanner("MAIN + BACKUP" .. pTag .. (burst and "  [BURST]" or ""),
+                                Color3.fromRGB(120, 180, 240))
+                        else
+                            currentPhase = "main"
+                            setBanner("MAIN PHASE" .. pTag .. (burst and "  [BURST]" or ""),
+                                Color3.fromRGB(120, 220, 120))
+                        end
+                        local ok, err = pcall(placeMainOrBackupOnce)
+                        if not ok then
+                            warn("[AutoPlaceV21] Main loop error: " .. tostring(err))
+                            lastResult = "ERROR: " .. tostring(err)
+                        end
+                        refreshStats()
+                        if burst then
+                            safeYield(CONFIG.FAST_PLACE_DELAY or 0)
+                        else
+                            local base  = CONFIG.LOOP_DELAY
+                            local jit   = CONFIG.LOOP_JITTER or 0
+                            local extra = (jit > 0) and randFloat(-jit, jit) or 0
+                            safeYield(math.max(0.01, base + extra))
+                        end
+                    end
+                else
+                    currentPhase = "waiting-wave"
+                    setBanner(string.format("WAIT WAVE >=%d (now=%s)",
+                        CONFIG.MAIN_START_WAVE,
+                        (lastWaveNum >= 0 and tostring(lastWaveNum) or "-")),
+                        Color3.fromRGB(255, 200, 100))
+                    refreshStats()
+                    task.wait(0.15)
+                end
+            end
+        end
+    end
+    print("[AutoPlaceV22] orchestrator-loop EXITED (instance invalidated)") -- penanda loop bener2 mati
+end)
+
+
+-- Stats refresh loop
+task.spawn(function()
+    while isAlive() do                                                    -- V22: cek instance setiap iterasi
+        task.wait(0.4)
+        pcall(refreshStats)
+    end
+    print("[AutoPlaceV22] stats-loop EXITED (instance invalidated)")
+end)
+
+print(string.format(
+    "[AutoPlaceV21] Loaded OK. Unit=%s | Cap=%d | P=%d M=%d | " ..
+    "Gate>=%d | UnlockOn: TIMER@%ds | CashGate(main only)=%s | " ..
+    "P_RANDOM=%s P_MAX_TRIES=%d MAIN_REQ_PRIO=%s MAIN_FORCE=%s TIMER_CLOCK_REQ=%s",
+    CONFIG.TARGET_UNIT, CONFIG.PlacementUnitMaxCap,
+    #SLOTS_PRIORITY, #SLOTS_MAIN, CONFIG.MAIN_START_WAVE,
+    CONFIG.TIMER_UNLOCK_AT_SEC or 1,
+    tostring(CONFIG.REQUIRE_CASH_GATE),
+    tostring(CONFIG.PRIORITY_RANDOM_ORDER),
+    CONFIG.PRIORITY_MAX_TRIES,
+    tostring(CONFIG.MAIN_REQUIRES_PRIORITY_OK),
+    tostring(CONFIG.MAIN_FORCE_AFTER_WAVE),
+    tostring(CONFIG.TIMER_REQUIRE_CLOCK_EMOJI)
+))
