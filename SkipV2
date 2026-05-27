@@ -1,0 +1,549 @@
+-- ==========================================================
+-- SKIP V2 (Perbaikan dari V1)
+-- ==========================================================
+-- Apa yang diperbaiki dari SkipV1:
+--   1) BUG "GUI freeze / semua tombol gak bisa diklik"
+--      ->  V1 spam VirtualInputManager (klik mouse fisik)
+--          tiap 0.5 detik tanpa cooldown. Posisi tombol
+--          AutoSkip di game sering overlap dengan panel
+--          script -> kliknya nyangkut ke panel sendiri.
+--      ->  V2: panel SELALU di-hide dulu sebelum VIM click,
+--          ada cooldown per-action, dan ada state-tracking
+--          biar gak nge-fire klik berulang kalau udah ON.
+--
+--   2) BUG "GameSpeed config = 2 tapi in-game tetap 1x"
+--      ->  V1 cuma InvokeServer ChangeTickSpeed sekali di
+--          awal dengan pcall, kalau remote belum ready -> diam.
+--      ->  V2: tunggu remote ready, lalu retry beberapa kali
+--          sampai sukses. Ada juga "enforce loop" yg setiap
+--          beberapa detik nge-resync speed ke nilai config.
+--
+--   3) Tambahan: semua config dikomentari di sebelah kanan
+--      dan dikelompokkan biar mudah dimengerti.
+-- ==========================================================
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                       CONFIGURATION                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+
+-- ── [1] FITUR UTAMA (yang sering kamu ubah) ────────────────
+-- Pengaturan utama: fitur mana yang aktif & speed game default.
+local Config = {
+    AutoSkip   = true,    -- true = aktifkan tombol "Auto Skip" otomatis di game (klik tombol AutoSkip kalau lagi Off). false = jangan otak-atik.
+    ManualSkip = true,    -- true = otomatis klik tombol "Skip Wave" tiap kali muncul di tengah ronde. false = nonaktif.
+    GameSpeed  = 2,       -- nilai 1 / 2 / 3. Speed gameplay yang dipaksakan ke server. 1=normal, 2=2x, 3=3x. Kalau set 2 -> game beneran 2x (dengan retry sampe sukses).
+}
+
+-- ── [2] LOOP TIMING (kalau gak tau, biarkan default) ───────
+-- Kontrol seberapa cepat script ngecek state UI game.
+local LOOP_INTERVAL        = 0.6   -- detik. Jeda antar iterasi loop utama. Lebih besar = lebih ringan.
+local AUTOSKIP_COOLDOWN    = 1.5   -- detik. Setelah klik tombol AutoSkip, tunggu sekian detik sebelum nyoba lagi (biar game sempat update state Off->On).
+local MANUAL_COOLDOWN      = 0.8   -- detik. Setelah klik Skip Wave, tunggu sekian detik (biar gak spam VIM bertubi-tubi).
+local SPEED_RESYNC_EVERY   = 5     -- detik. Tiap berapa detik script re-invoke ChangeTickSpeed ke server biar speed gak balik ke 1x.
+local SPEED_INIT_RETRIES   = 10    -- jumlah retry. Berapa kali script coba InvokeServer di awal load (kalau remote belum ready). Tiap retry jaraknya 0.5 detik.
+
+-- ── [3] DEBUG ──────────────────────────────────────────────
+local DEBUG_PRINT          = false -- true = print log ke F9 console (untuk debug). false = silent.
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                         SERVICES                          ║
+-- ╚══════════════════════════════════════════════════════════╝
+local CoreGui              = game:GetService("CoreGui")
+local Players              = game:GetService("Players")
+local ReplicatedStorage    = game:GetService("ReplicatedStorage")
+local UserInputService     = game:GetService("UserInputService")
+local RunService           = game:GetService("RunService")
+
+local VirtualInputManager  = nil
+pcall(function() VirtualInputManager = game:GetService("VirtualInputManager") end)
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                          STATE                            ║
+-- ╚══════════════════════════════════════════════════════════╝
+local isRunning           = true       -- master flag, di-set false saat panel ditutup
+local isMinimized         = false
+local lastAutoSkipClickAt = 0           -- timestamp klik AutoSkip terakhir
+local lastManualClickAt   = 0           -- timestamp klik Skip Wave terakhir
+local lastSpeedSyncAt     = 0           -- timestamp resync ChangeTickSpeed terakhir
+local autoSkipAttempt     = 0           -- counter retry method (1..3) buat AutoSkip
+local manualSkipAttempt   = 0           -- counter retry method (1..3) buat Skip Wave
+
+local function dprint(...)
+    if DEBUG_PRINT then print("[SkipV2]", ...) end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                   SAFE PATH HELPERS                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function safeChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+-- ambil tombol AutoSkip di UI game.
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls.AutoSkip
+local function getAutoSkipButton()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    local wc  = safeChild(top, "WaveControls")
+    return safeChild(wc, "AutoSkip")
+end
+
+-- ambil tombol Skip Wave (yang muncul di tengah ronde)
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.SkipWave (frame), Button di dalamnya
+local function getSkipWaveFrame()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "SkipWave")
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                REMOTE: ChangeTickSpeed                    ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function getTickSpeedRemote()
+    local rf = safeChild(ReplicatedStorage, "RemoteFunctions")
+    if not rf then return nil end
+    return safeChild(rf, "ChangeTickSpeed")
+end
+
+-- nge-fire ChangeTickSpeed dengan retry sampai sukses atau habis attempt.
+-- DIPAKAI saat: load awal + saat user pencet tombol speed di GUI.
+local function setGameSpeed(value, retries)
+    retries = retries or 1
+    for i = 1, retries do
+        local r = getTickSpeedRemote()
+        if r then
+            local ok, err = pcall(function() r:InvokeServer(value) end)
+            if ok then
+                dprint("ChangeTickSpeed sukses ->", value, "(attempt " .. i .. ")")
+                return true
+            else
+                dprint("ChangeTickSpeed error:", err)
+            end
+        else
+            dprint("Remote ChangeTickSpeed belum ready, attempt " .. i)
+        end
+        task.wait(0.5)
+    end
+    return false
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              VIRTUAL CLICK (3-method, panel-safe)         ║
+-- ╚══════════════════════════════════════════════════════════╝
+local _ScreenGuiRef = nil   -- akan di-set setelah ScreenGui dibuat (dipakai utk hide panel saat VIM click)
+
+local function clickViaConnections(button)
+    if typeof(getconnections) ~= "function" then return false end
+    local fired = false
+    local signals = { "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }
+    for _, sig in ipairs(signals) do
+        pcall(function()
+            local ev = button[sig]
+            if ev then
+                local conns = getconnections(ev)
+                if conns then
+                    for _, c in ipairs(conns) do
+                        local ok = pcall(function() c:Fire() end)
+                        if not ok and typeof(firesignal) == "function" then
+                            pcall(function() firesignal(c) end)
+                        end
+                        fired = true
+                    end
+                end
+            end
+        end)
+    end
+    return fired
+end
+
+local function clickViaFiresignal(button)
+    if typeof(firesignal) ~= "function" then return false end
+    local signals = { "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }
+    local fired = false
+    for _, sig in ipairs(signals) do
+        pcall(function()
+            if button[sig] then
+                firesignal(button[sig])
+                fired = true
+            end
+        end)
+    end
+    return fired
+end
+
+-- VIM click yang AMAN: panel script di-hide dulu, klik dilakukan,
+-- lalu panel di-show lagi. Ini mencegah klik VIM nyangkut ke panel.
+local function clickViaVIM(button)
+    if not VirtualInputManager then return false end
+    if not button or not button.Parent then return false end
+    local ok = pcall(function()
+        local pos  = button.AbsolutePosition
+        local size = button.AbsoluteSize
+        local x = pos.X + size.X / 2
+        local y = pos.Y + size.Y / 2
+
+        -- KUNCI ANTI-FREEZE: hide panel sebelum klik fisik
+        local prevEnabled
+        if _ScreenGuiRef then
+            prevEnabled = _ScreenGuiRef.Enabled
+            _ScreenGuiRef.Enabled = false
+        end
+
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true,  game, 0)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+
+        if _ScreenGuiRef then
+            _ScreenGuiRef.Enabled = (prevEnabled ~= false)  -- balikin state semula (default true)
+        end
+    end)
+    return ok
+end
+
+local function virtualClick(button, attempt)
+    if not button then return end
+    attempt = attempt or 1
+
+    local targets = { button }
+    local title = button:FindFirstChild("Title")
+    if title and (title:IsA("TextLabel") or title:IsA("ImageLabel") or title:IsA("TextButton") or title:IsA("ImageButton")) then
+        table.insert(targets, title)
+    end
+
+    for _, t in ipairs(targets) do
+        if attempt == 1 then
+            clickViaConnections(t)
+            clickViaFiresignal(t)
+        elseif attempt == 2 then
+            clickViaFiresignal(t)
+            clickViaVIM(t)
+        else
+            clickViaVIM(t)
+            clickViaConnections(t)
+            clickViaFiresignal(t)
+        end
+    end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                            GUI                            ║
+-- ╚══════════════════════════════════════════════════════════╝
+if CoreGui:FindFirstChild("TowerDefenseSkipPanelV2") then
+    CoreGui.TowerDefenseSkipPanelV2:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "TowerDefenseSkipPanelV2"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+
+local ok = pcall(function() ScreenGui.Parent = CoreGui end)
+if not ok then ScreenGui.Parent = PlayerGui end
+_ScreenGuiRef = ScreenGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 250, 0, 230)
+MainFrame.Position = UDim2.new(0.5, -125, 0.5, -115)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -70, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Skip Panel V2 (Fixed)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 13
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TopBar
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Size = UDim2.new(0, 30, 0, 30)
+MinimizeBtn.Position = UDim2.new(1, -60, 0, 0)
+MinimizeBtn.BackgroundTransparency = 1
+MinimizeBtn.Text = "-"
+MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinimizeBtn.TextSize = 18
+MinimizeBtn.Font = Enum.Font.GothamBold
+MinimizeBtn.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 75, 75)
+CloseBtn.TextSize = 14
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local function createToggleButton(parent, name, pos, defaultState)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0.9, 0, 0, 35)
+    btn.Position = pos
+    btn.BackgroundColor3 = defaultState and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+    btn.Text = name .. (defaultState and ": ON" or ": OFF")
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 13
+    btn.AutoButtonColor = false
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+local AutoSkipBtnUI   = createToggleButton(ContentFrame, "Auto Skip",        UDim2.new(0.05, 0, 0, 15), Config.AutoSkip)
+local ManualSkipBtnUI = createToggleButton(ContentFrame, "Manual Skip Loop", UDim2.new(0.05, 0, 0, 60), Config.ManualSkip)
+
+local SpeedLabel = Instance.new("TextLabel")
+SpeedLabel.Size = UDim2.new(0.9, 0, 0, 20)
+SpeedLabel.Position = UDim2.new(0.05, 0, 0, 110)
+SpeedLabel.BackgroundTransparency = 1
+SpeedLabel.Text = "Game Speed (Current: " .. Config.GameSpeed .. "x)"
+SpeedLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+SpeedLabel.Font = Enum.Font.Gotham
+SpeedLabel.TextSize = 12
+SpeedLabel.Parent = ContentFrame
+
+local SpeedContainer = Instance.new("Frame")
+SpeedContainer.Size = UDim2.new(0.9, 0, 0, 35)
+SpeedContainer.Position = UDim2.new(0.05, 0, 0, 135)
+SpeedContainer.BackgroundTransparency = 1
+SpeedContainer.Parent = ContentFrame
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.FillDirection = Enum.FillDirection.Horizontal
+UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.SpaceBetween
+UIListLayout.Parent = SpeedContainer
+
+local function refreshSpeedHighlight()
+    for _, child in pairs(SpeedContainer:GetChildren()) do
+        if child:IsA("TextButton") then
+            child.BackgroundColor3 = (child.Text == Config.GameSpeed .. "x")
+                and Color3.fromRGB(50, 150, 250)
+                or  Color3.fromRGB(50, 50, 50)
+        end
+    end
+    SpeedLabel.Text = "Game Speed (Current: " .. Config.GameSpeed .. "x)"
+end
+
+for i = 1, 3 do
+    local spdBtn = Instance.new("TextButton")
+    spdBtn.Size = UDim2.new(0, 70, 1, 0)
+    spdBtn.BackgroundColor3 = (Config.GameSpeed == i) and Color3.fromRGB(50, 150, 250) or Color3.fromRGB(50, 50, 50)
+    spdBtn.Text = i .. "x"
+    spdBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    spdBtn.Font = Enum.Font.GothamBold
+    spdBtn.TextSize = 13
+    spdBtn.AutoButtonColor = false
+    spdBtn.Parent = SpeedContainer
+    Instance.new("UICorner", spdBtn).CornerRadius = UDim.new(0, 6)
+
+    spdBtn.MouseButton1Click:Connect(function()
+        Config.GameSpeed = i
+        refreshSpeedHighlight()
+        -- langsung set, dengan retry beberapa kali kalau-kalau remote sibuk
+        task.spawn(function() setGameSpeed(Config.GameSpeed, 3) end)
+        lastSpeedSyncAt = os.clock()  -- jangan langsung resync lagi di loop
+    end)
+end
+
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.new(0.9, 0, 0, 20)
+StatusLbl.Position = UDim2.new(0.05, 0, 0, 180)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text = "Status: Idle"
+StatusLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.Parent = ContentFrame
+
+local function setStatus(s)
+    StatusLbl.Text = "Status: " .. tostring(s)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  DRAG GUI (TopBar)                        ║
+-- ╚══════════════════════════════════════════════════════════╝
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging  = true
+        dragStart = input.Position
+        startPos  = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                 BUTTON HANDLERS (panel)                   ║
+-- ╚══════════════════════════════════════════════════════════╝
+MinimizeBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    ContentFrame.Visible = not isMinimized
+    MainFrame.Size = isMinimized and UDim2.new(0, 250, 0, 30) or UDim2.new(0, 250, 0, 230)
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+
+AutoSkipBtnUI.MouseButton1Click:Connect(function()
+    Config.AutoSkip = not Config.AutoSkip
+    AutoSkipBtnUI.BackgroundColor3 = Config.AutoSkip and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+    AutoSkipBtnUI.Text = "Auto Skip: " .. (Config.AutoSkip and "ON" or "OFF")
+    autoSkipAttempt = 0  -- reset retry counter
+end)
+
+ManualSkipBtnUI.MouseButton1Click:Connect(function()
+    Config.ManualSkip = not Config.ManualSkip
+    ManualSkipBtnUI.BackgroundColor3 = Config.ManualSkip and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+    ManualSkipBtnUI.Text = "Manual Skip Loop: " .. (Config.ManualSkip and "ON" or "OFF")
+    manualSkipAttempt = 0
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║          INITIAL GAME SPEED (dengan retry asinkron)       ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    -- Tunggu remote eksis dulu (game baru loading)
+    local rf = ReplicatedStorage:WaitForChild("RemoteFunctions", 15)
+    if rf then
+        rf:WaitForChild("ChangeTickSpeed", 10)
+    end
+    -- Lalu retry sampai sukses (atau habis budget)
+    local ok = setGameSpeed(Config.GameSpeed, SPEED_INIT_RETRIES)
+    if ok then
+        setStatus("GameSpeed di-set ke " .. Config.GameSpeed .. "x")
+    else
+        setStatus("GameSpeed gagal di-set (remote belum siap)")
+    end
+    lastSpeedSyncAt = os.clock()
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                       MAIN LOOP                           ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        task.wait(LOOP_INTERVAL)
+
+        local now = os.clock()
+        local statusParts = {}
+
+        -- ── [A] Re-sync GameSpeed periodik ────────────────
+        -- Kalau game/round restart, kadang server reset ke 1x.
+        -- Jadi tiap SPEED_RESYNC_EVERY detik kita push ulang.
+        if (now - lastSpeedSyncAt) >= SPEED_RESYNC_EVERY then
+            task.spawn(function() setGameSpeed(Config.GameSpeed, 1) end)
+            lastSpeedSyncAt = now
+            table.insert(statusParts, "Resync " .. Config.GameSpeed .. "x")
+        end
+
+        -- ── [B] AUTO SKIP: hidupkan kalau lagi Off ────────
+        if Config.AutoSkip and (now - lastAutoSkipClickAt) >= AUTOSKIP_COOLDOWN then
+            local btn = getAutoSkipButton()
+            local titleLabel = btn and btn:FindFirstChild("Title")
+            if btn and titleLabel and string.find(titleLabel.Text, "Off") then
+                autoSkipAttempt = autoSkipAttempt + 1
+                if autoSkipAttempt > 3 then autoSkipAttempt = 1 end
+                table.insert(statusParts, "AutoSkip method " .. autoSkipAttempt)
+                virtualClick(btn, autoSkipAttempt)
+                lastAutoSkipClickAt = os.clock()
+            else
+                autoSkipAttempt = 0
+            end
+        end
+
+        -- ── [C] MANUAL SKIP: klik kalau frame SkipWave muncul ──
+        if Config.ManualSkip and (now - lastManualClickAt) >= MANUAL_COOLDOWN then
+            local frame = getSkipWaveFrame()
+            if frame and frame.Visible then
+                local mbtn = frame:FindFirstChild("Button")
+                if mbtn then
+                    manualSkipAttempt = manualSkipAttempt + 1
+                    if manualSkipAttempt > 3 then manualSkipAttempt = 1 end
+                    table.insert(statusParts, "SkipWave method " .. manualSkipAttempt)
+                    virtualClick(mbtn, manualSkipAttempt)
+                    lastManualClickAt = os.clock()
+                end
+            else
+                manualSkipAttempt = 0
+            end
+        end
+
+        if #statusParts == 0 then
+            setStatus("Watching UI... | Speed=" .. Config.GameSpeed .. "x")
+        else
+            setStatus(table.concat(statusParts, " | "))
+        end
+    end
+    dprint("Loop berhenti (panel ditutup atau script dimatikan).")
+end)
+
+print(string.format(
+    "[SkipV2] Loaded. AutoSkip=%s | ManualSkip=%s | Speed=%dx",
+    tostring(Config.AutoSkip), tostring(Config.ManualSkip), Config.GameSpeed
+))
