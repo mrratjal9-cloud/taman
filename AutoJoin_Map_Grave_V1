@@ -1,0 +1,317 @@
+-- ==========================================
+-- AUTO JOINER V2 (Compatibility Fix)
+-- Perbaikan: 
+--   1. Hapus keyword "continue" (tidak didukung sebagian executor)
+--   2. Tambah firesignal fallback untuk virtualClick
+--   3. Bungkus eksekusi utama dengan pcall pengaman global
+--   4. Inisialisasi service & GUI lebih aman
+-- ==========================================
+
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local AUTO_START      = true
+local TARGET_MAP      = "map_graveyard"   -- Ganti sesuai id map (contoh: map_graveyard)
+local TARGET_DIF      = "dif_easy"   -- dif_easy, dif_normal, dif_hard, dif_insane, dif_impossible, dif_apocalypse
+local MAX_PLAYERS     = 1
+local LOBBY_PLACE_ID  = 108533757090220
+
+-- Daftar pintu (Sesuaikan RemoteIndex dengan nomor pintunya)
+local DOORS = {
+    {CF = CFrame.new(84.8885498, 66.4031448, 789.898621),  RemoteIndex = "5"},
+    {CF = CFrame.new(96.9751129, 66.0011368, 789.898621),  RemoteIndex = "6"},
+    {CF = CFrame.new(109.094376, 66.3031387, 789.898621),  RemoteIndex = "7"},
+    {CF = CFrame.new(121.804642, 66.9051361, 789.898621),  RemoteIndex = "8"},
+}
+
+-- ==========================================
+-- SERVICES
+-- ==========================================
+local CoreGui            = game:GetService("CoreGui")
+local UserInputService   = game:GetService("UserInputService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local LocalPlayer        = Players.LocalPlayer
+
+-- ==========================================
+-- VARIABLES
+-- ==========================================
+local isRunning          = AUTO_START
+local activeRemoteSuffix = "8"
+
+-- ==========================================
+-- GUI SETUP
+-- ==========================================
+pcall(function()
+    if CoreGui:FindFirstChild("AutoJoinerGUI") then
+        CoreGui.AutoJoinerGUI:Destroy()
+    end
+end)
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoJoinerGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 250, 0, 120)
+MainFrame.Position = UDim2.new(0.5, -125, 0.5, -60)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 30, 40)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(25, 20, 30)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Auto Joiner V2 (Fixed)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 12
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TopBar
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.8, 0, 0, 40)
+ToggleBtn.Position = UDim2.new(0.1, 0, 0.5, -20)
+ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 14
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = MainFrame
+Instance.new("UICorner", ToggleBtn)
+
+-- ==========================================
+-- DRAG SYSTEM
+-- ==========================================
+local dragging, dragInput, dragStart, startPos
+
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging  = true
+        dragStart = input.Position
+        startPos  = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    ToggleBtn.BackgroundColor3 = isRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    ToggleBtn.Text = isRunning and "Status: ON" or "Status: OFF"
+end)
+
+-- ==========================================
+-- VIRTUAL CLICK (multi-executor compatible)
+-- ==========================================
+local function fireSignalConn(conn)
+    -- Coba beberapa metode agar kompatibel di banyak executor
+    local ok = pcall(function() conn:Fire() end)
+    if ok then return true end
+    if typeof(firesignal) == "function" then
+        return pcall(function() firesignal(conn) end)
+    end
+    return false
+end
+
+local function virtualClick(button)
+    if not button then return end
+    if typeof(getconnections) ~= "function" then
+        -- Fallback: panggil event langsung jika executor mendukung
+        if typeof(firesignal) == "function" then
+            pcall(function() firesignal(button.MouseButton1Click) end)
+            pcall(function() firesignal(button.Activated) end)
+        end
+        return
+    end
+
+    local signals = { "MouseButton1Click", "Activated", "MouseButton1Down" }
+    for _, sigName in ipairs(signals) do
+        local ok, conns = pcall(getconnections, button[sigName])
+        if ok and conns then
+            for _, c in ipairs(conns) do
+                fireSignalConn(c)
+            end
+        end
+    end
+end
+
+-- ==========================================
+-- HELPERS
+-- ==========================================
+local function safeFindChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+local function getRemote(name)
+    local remotes = ReplicatedStorage:FindFirstChild("RemoteFunctions")
+    if not remotes then return nil end
+    return remotes:FindFirstChild(name)
+end
+
+-- ==========================================
+-- MAIN LOGIC (STATE MACHINE)
+-- ==========================================
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+
+        -- Bungkus seluruh iterasi dengan pcall agar 1 error tidak menghentikan loop
+        local ok, err = pcall(function()
+            if not isRunning then return end
+            if game.PlaceId ~= LOBBY_PLACE_ID then return end
+
+            local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if not pGui then return end -- pengganti `continue`
+
+            local gameGui   = safeFindChild(pGui, "GameGui")
+            local screen    = safeFindChild(gameGui, "Screen")
+
+            -- Path 1 (Bottom.Lobby) & Tombol Start
+            local bottom        = safeFindChild(screen, "Bottom")
+            local bottomLobby   = safeFindChild(bottom, "Lobby")
+            local lobbyFrame    = safeFindChild(bottomLobby, "Frame")
+            local lobbyButtons  = safeFindChild(lobbyFrame, "Buttons")
+            local startNowBtn   = safeFindChild(lobbyButtons, "StartNow")
+
+            -- Path Menu (Middle.MapPickerLobby)
+            local middle         = safeFindChild(screen, "Middle")
+            local mapPickerLobby = safeFindChild(middle, "MapPickerLobby")
+            local items          = safeFindChild(mapPickerLobby, "Items")
+            local frame          = safeFindChild(items, "Frame")
+
+            -- Tombol Create Lobby (Accept)
+            local frameInfo = safeFindChild(frame, "Info")
+            local acceptBtn = safeFindChild(frameInfo, "Accept")
+
+            -- Tombol Pilihan Map
+            local mapsFolder    = safeFindChild(frame, "Maps")
+            local scrollFrame   = safeFindChild(mapsFolder, "ScrollingFrame")
+            local contentFolder = safeFindChild(scrollFrame, "Content")
+            local targetMapBtn  = safeFindChild(contentFolder, TARGET_MAP)
+
+            -- ==========================================
+            -- STATUS 1: SUDAH DI DALAM LOBBY
+            -- ==========================================
+            if bottomLobby and bottomLobby.Visible == true then
+                print("[AutoJoinV2] Status: In Room. Menyiapkan Start...")
+
+                local setMaxRemote = getRemote("LobbySetMaxPlayers_" .. activeRemoteSuffix)
+                if setMaxRemote then
+                    pcall(function()
+                        setMaxRemote:InvokeServer(MAX_PLAYERS)
+                    end)
+                end
+                task.wait(0.5)
+
+                if startNowBtn then
+                    print("[AutoJoinV2] Mengeklik tombol StartNow...")
+                    virtualClick(startNowBtn)
+                    print("[AutoJoinV2] Berhasil Start! Menunggu teleportasi...")
+                    task.wait(6)
+                end
+
+            -- ==========================================
+            -- STATUS 2: DI MENU PEMILIHAN MAP
+            -- ==========================================
+            elseif mapPickerLobby and mapPickerLobby.Visible == true then
+                if acceptBtn then
+                    print("[AutoJoinV2] Status: Picking Map. Memilih Map...")
+                    task.wait(0.5)
+
+                    if targetMapBtn then
+                        print("[AutoJoinV2] Klik icon map: " .. TARGET_MAP)
+                        virtualClick(targetMapBtn)
+                        task.wait(0.3)
+                    else
+                        warn("[AutoJoinV2] Map '" .. TARGET_MAP .. "' tidak ditemukan di UI!")
+                    end
+
+                    print("[AutoJoinV2] Klik Create Lobby...")
+                    virtualClick(acceptBtn)
+
+                    local setMapRemote = getRemote("LobbySetMap_" .. activeRemoteSuffix)
+                    if setMapRemote then
+                        pcall(function()
+                            setMapRemote:InvokeServer(TARGET_MAP, TARGET_DIF, false)
+                        end)
+                    end
+
+                    print("[AutoJoinV2] Setup Map Selesai!")
+                    task.wait(1.5)
+                end
+
+            -- ==========================================
+            -- STATUS 3: MENCARI PINTU
+            -- ==========================================
+            else
+                for _, door in ipairs(DOORS) do
+                    if not isRunning then break end
+                    local char = LocalPlayer.Character
+                    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.CFrame = door.CF
+                        task.wait(1.2)
+
+                        -- Refresh referensi UI setelah teleport
+                        local pGui2  = LocalPlayer:FindFirstChild("PlayerGui")
+                        local mp     = safeFindChild(safeFindChild(safeFindChild(pGui2, "GameGui"), "Screen"), "Middle")
+                        local mpl    = safeFindChild(mp, "MapPickerLobby")
+
+                        if mpl and mpl.Visible == true then
+                            activeRemoteSuffix = door.RemoteIndex
+                            print("[AutoJoinV2] Berhasil masuk Pintu " .. activeRemoteSuffix)
+                            break
+                        else
+                            print("[AutoJoinV2] Pintu " .. door.RemoteIndex .. " penuh. Memaksa LeaveLobby...")
+                            local leaveRemote = getRemote("LeaveLobby_" .. door.RemoteIndex)
+                            if leaveRemote then
+                                pcall(function() leaveRemote:InvokeServer() end)
+                            end
+                            task.wait(0.5)
+                        end
+                    end
+                end
+            end
+        end)
+
+        if not ok then
+            warn("[AutoJoinV2] Iterasi error: " .. tostring(err))
+        end
+    end
+end)
+
+print("[AutoJoinV2] Script berhasil dimuat. Status awal: " .. (isRunning and "ON" or "OFF"))
