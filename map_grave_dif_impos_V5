@@ -128,7 +128,7 @@ local CONFIG = {
     -- [2] TIMING  (semua delay & polling - satuan: detik)
     -- ===========================================================
     BOOT_DELAY   = 0.0,    -- [TIMING] guna: jeda sebelum script mulai bekerja. | nilai: 0-5. | efek: 0 = instan.
-    LOOP_DELAY   = 5.00,  -- [TIMING] guna: jeda antar peletakan unit_log_roller di MAIN loop. | nilai dalam DETIK (float). | NOTE: 10.50 = 10 detik 500 ms. | konversi: 3.05 = 3d 50ms; 3.50 = 3d 500ms; 10.50 = 10d 500ms.
+    LOOP_DELAY   = 7.00,  -- [TIMING] guna: jeda antar peletakan unit_log_roller di MAIN loop. | nilai dalam DETIK (float). | NOTE: 10.50 = 10 detik 500 ms. | konversi: 3.05 = 3d 50ms; 3.50 = 3d 500ms; 10.50 = 10d 500ms.
     LOOP_JITTER  = 0.02,   -- [TIMING] guna: variasi acak ± LOOP_DELAY. | nilai: 0-0.05. | efek: anti-deteksi pola macro.
     WAVE_POLL    = 0.05,   -- [TIMING] guna: interval baca teks Wave. | nilai: 0.03-0.20. | efek: kecil = respons wave cepat ke-detect.
     TIMER_POLL   = 0.03,   -- [TIMING] guna: interval baca .Text dari widget timer (cached, sangat ringan). | nilai: 0.02-0.10. | efek: kecil = trigger T-1s lebih akurat (rekomendasi).
@@ -193,7 +193,7 @@ local CONFIG = {
     -- ===========================================================
     WAVE_CONTROL = true,    -- [WAVE] guna: aktifkan logic wave-based ON/OFF. | nilai: true/false. | efek: true = script auto-pause saat lewat STOP_WAVE.
     START_WAVE   = 2,       -- [WAVE] guna: wave saat status auto-ON. | nilai: 1-3. | efek: biasanya 1.
-    STOP_WAVE    = 8,       -- [WAVE] guna: wave saat status auto-OFF. | nilai: tergantung map. | efek: setelah wave ini = pause + tunggu reset.
+    STOP_WAVE    = 9,       -- [WAVE] guna: wave saat status auto-OFF. | nilai: tergantung map. | efek: setelah wave ini = pause + tunggu reset.
 
     -- ===========================================================
     -- [8] AUTO-RESTART  (deteksi game baru / round reset)
