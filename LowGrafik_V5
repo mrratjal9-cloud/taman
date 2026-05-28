@@ -1,11 +1,11 @@
 -- ==============================================================================
--- GARDEN TD AFK OPTIMIZER & BLACK SCREEN  (LowGrafik V9 - Wave Decrease Tracker)
+-- GARDEN TD AFK OPTIMIZER & BLACK SCREEN  (LowGrafik V11 - Flag/Nerf Detector)
 -- ------------------------------------------------------------------------------
 -- Perubahan dari versi sebelumnya:
---   [1] HAPUS deteksi GameEnd UI yang rawan bug (kadang muncul, kadang tidak).
---   [2] MENGAMBIL logika dari AutoPlaceV22: "Wave Decrease Detection". 
---       Jika angka Wave turun (misal dari Wave 28 kembali ke Wave 1), 
---       script otomatis menghitungnya sebagai +1 Game dimainkan. 100% Akurat.
+--   [1] Menambahkan deteksi 'Flag/Nerf' Macro berdasarkan path UI BoostHolder
+--       (SeedsMult, SpaceGemsMult, TicketsMult).
+--   [2] Jika salah satu mult tersebut Visible, header akan otomatis memunculkan 
+--       emoji "⚠️" di samping teks IN GAME / LOBBY.
 -- ==============================================================================
 
 -- ╔══════════════════════════════════════════════════════════╗
@@ -51,16 +51,17 @@ local stats = {
     Wave    = "Mencari Wave...",
     SeedNow = 0,
     SessionTimerString = "-",
+    IsFlagged = false, -- Status flag makro
 }
 
 local totalEarnedSeed  = 0
 local lastRoundSeed    = 0
 local processedSeeds   = {}
 
-local maxSessionSec    = 0
+local matchHighestSec  = 0
 local lastGameTime     = 0
 local totalGamesPlayed = 0
-local lastWaveNum      = 0 -- Variabel baru untuk melacak angka Wave sebelumnya
+local gameEndedHandled = false 
 
 local locationStatus = "UNKNOWN LOCATION"
 if game.PlaceId == INGAME_PLACE_ID then
@@ -473,46 +474,81 @@ local function getInGameTimer()
 end
 
 local function updateTracker()
-    -- 1) Mengambil Waktu (Untuk ditampilkan)
     local sessionTimerText = getInGameTimer()
     local currentSec = parseMMSS(sessionTimerText)
 
-    if currentSec and currentSec > maxSessionSec then
-        maxSessionSec = currentSec
+    if currentSec and not gameEndedHandled then
+        if currentSec > matchHighestSec then
+            matchHighestSec = currentSec
+        end
     end
+    
     stats.SessionTimerString = (sessionTimerText ~= "-") and string.gsub(sessionTimerText, "⏱%s*", "") or "-"
 
-    -- 2) Mengekstrak Wave & Mengecek Game Reset berdasarkan penurunan Wave
     pcall(function()
-        local gameGuiNoInset = PlayerGui:FindFirstChild("GameGuiNoInset")
-        local title = gameGuiNoInset.Screen.Top.GameInfo.Content.Waves.Title
-        if title and title.Text ~= "" then
-            stats.Wave = title.Text
+        local gameEndUI = PlayerGui:FindFirstChild("GameGui")
+            and PlayerGui.GameGui:FindFirstChild("Screen")
+            and PlayerGui.GameGui.Screen:FindFirstChild("Middle")
+            and PlayerGui.GameGui.Screen.Middle:FindFirstChild("GameEnd")
             
-            -- LOGIKA BARU: Ambil hanya angkanya saja (misal "Wave 10 / 40" -> 10)
-            local currentWaveNum = tonumber(string.match(title.Text, "%d+"))
-            
-            if currentWaveNum then
-                -- Jika angka wave tiba-tiba turun drastis, berarti ronde baru telah dimulai
-                if lastWaveNum > 0 and currentWaveNum < lastWaveNum then
+        if gameEndUI then
+            if gameEndUI.Visible == true then
+                if not gameEndedHandled then
                     totalGamesPlayed = totalGamesPlayed + 1
-                    lastGameTime = maxSessionSec -- Simpan rekor waktu ronde sebelumnya
-                    maxSessionSec = 0            -- Reset ulang catatan waktu
+                    
+                    if matchHighestSec > 10 then
+                        lastGameTime = matchHighestSec
+                    elseif matchHighestSec > 0 and lastGameTime == 0 then
+                        lastGameTime = matchHighestSec
+                    end
+                    
+                    gameEndedHandled = true
                 end
-                
-                -- Perbarui catatan wave terakhir
-                lastWaveNum = currentWaveNum
+            else
+                if gameEndedHandled then
+                    gameEndedHandled = false
+                    matchHighestSec = 0 
+                end
             end
         end
     end)
 
-    -- 3) Cek Seed Berjalan
     pcall(function()
         local gameGui = PlayerGui:FindFirstChild("GameGui")
         local title = gameGui.Screen.Bottom.CurrencyDisplay.SeedsDisplay.Title
         if title and title.Text ~= "" then
             local num = tonumber((string.gsub(title.Text, "[^%d]", "")))
             if num then stats.SeedNow = num end
+        end
+    end)
+
+    pcall(function()
+        local gameGuiNoInset = PlayerGui:FindFirstChild("GameGuiNoInset")
+        local title = gameGuiNoInset.Screen.Top.GameInfo.Content.Waves.Title
+        if title and title.Text ~= "" then
+            stats.Wave = title.Text
+        end
+    end)
+    
+    -- DETEKSI FLAG/NERF MACRO
+    pcall(function()
+        stats.IsFlagged = false
+        local boostHolder = PlayerGui:FindFirstChild("GameGui")
+            and PlayerGui.GameGui:FindFirstChild("Screen")
+            and PlayerGui.GameGui.Screen:FindFirstChild("BottomLeft")
+            and PlayerGui.GameGui.Screen.BottomLeft:FindFirstChild("BoostHolder")
+            
+        if boostHolder then
+            local seedsMult = boostHolder:FindFirstChild("SeedsMult")
+            local gemsMult = boostHolder:FindFirstChild("SpaceGemsMult")
+            local ticketsMult = boostHolder:FindFirstChild("TicketsMult")
+            
+            -- Jika salah satu multiplier visible, berarti akun kena flag
+            if (seedsMult and seedsMult.Visible) or 
+               (gemsMult and gemsMult.Visible) or 
+               (ticketsMult and ticketsMult.Visible) then
+                stats.IsFlagged = true
+            end
         end
     end)
 end
@@ -525,10 +561,13 @@ task.spawn(function()
         pcall(updateTracker)
 
         if isOptimized then
+            -- Menambahkan emoji Peringatan jika status akun ter-Flag
+            local warningStr = stats.IsFlagged and "⚠️ " or ""
+            
             if locationStatus == "IN GAME" then
-                headerLabel.Text = "IN GAME (" .. tostring(totalGamesPlayed) .. ")"
+                headerLabel.Text = warningStr .. "IN GAME (" .. tostring(totalGamesPlayed) .. ")"
             else
-                headerLabel.Text = locationStatus
+                headerLabel.Text = warningStr .. locationStatus
             end
 
             local totalPlayTime = os.time() - SCRIPT_START_TIME
@@ -572,4 +611,4 @@ if Config.AutoOptimizer then
     end)
 end
 
-print("[LowGrafikV9] Loaded. Wave Decrease Tracker Active.")
+print("[LowGrafikV11] Loaded. Macro Flag Detector Active.")
