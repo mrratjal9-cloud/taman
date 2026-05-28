@@ -1,0 +1,736 @@
+-- ==========================================================
+-- SKIP V9 (V8 + Config Delay antar Waypoint & Lap)
+-- ==========================================================
+-- LANDASAN: SkipV8.
+--
+-- TAMBAHAN DI V9:
+--   1) Config WaypointDelay     = jeda setelah karakter sampai
+--      di SATU waypoint sebelum lanjut ke waypoint berikutnya.
+--      Default 0.5 detik. Set 0 kalau gak mau jeda sama sekali.
+--
+--   2) Config LapDelay          = jeda setelah selesai SATU
+--      putaran (semua waypoint dilewati) sebelum mulai
+--      putaran berikutnya. Default 1.0 detik.
+--
+--   3) Config DelayJitter       = nilai random TAMBAHAN ke
+--      WaypointDelay & LapDelay supaya pola jalan gak monoton
+--      (lebih natural / lebih anti-detect AFK macro).
+--      Default 0 = matikan jitter. Contoh isi 0.5 = delay
+--      sebenarnya = base + random(0..0.5).
+--
+--   Fitur lain dari V8 dipertahankan 100% (Skip + Game Speed
+--   + Auto Jalan loop + GUI pattern AutoReplayV5).
+-- ==========================================================
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                       CONFIGURATION                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+
+-- ── [KATEGORI 1] FITUR SKIP ────────────────────────────────
+-- Pengaturan tombol skip di game.
+local Config = {
+    AutoSkip   = true,    -- true = saat eksekusi langsung NYALAKAN tombol "Auto Skip" di game. false = jangan otak-atik.
+    ManualSkip = true,    -- true = saat eksekusi otomatis klik "Skip Wave >>" tiap kali muncul. false = nonaktif.
+}
+
+-- ── [KATEGORI 2] GAME SPEED (Tick Speed) ───────────────────
+-- Speed gameplay yang langsung di-apply saat eksekusi.
+local SpeedConfig = {
+    GameSpeed  = 2,       -- 1 / 2 / 3 (max 3x). Di-apply otomatis SEKALI di awal + tiap round baru. Implementasi: KLIK tombol TickSpeed.Items.{N} pakai firesignal (BUKAN InvokeServer -> aman dari crash V2).
+}
+
+-- ── [KATEGORI 3] AUTO JALAN (Anti AFK) ─────────────────────
+-- Karakter otomatis jalan keliling waypoints supaya gak ke-kick AFK.
+local AutoJalanConfig = {
+
+    AutoJalan    = true,                -- true = langsung mulai JALAN saat eksekusi. false = nonaktif di awal (masih bisa dinyalakan via GUI).
+    StartDelay   = 10,                  -- detik. Jeda sebelum mulai jalan (kasih waktu game & karakter loading).
+    PlaceIdGuard = 123516946198836,     -- ID place yang valid untuk auto jalan. Set 0 untuk matikan guard (jalan di place manapun).
+    Loop         = true,                -- true = ulang terus titik-titik (anti AFK forever). false = jalan SEKALI putaran saja lalu stop.
+    MoveTimeout  = 30,                  -- detik. Timeout per-waypoint. Kalau lebih dari ini gak nyampe (nyangkut), lanjut waypoint berikutnya.
+    ArriveDist   = 5,                   -- studs. Jarak dianggap "sampai" di waypoint (biar gak nungguin tepat di koordinat).
+
+    -- ── Delay antar pergerakan ─────────────────────────────
+    WaypointDelay = 0.5,                -- detik. Jeda SETELAH sampai di SATU waypoint sebelum lanjut ke waypoint berikutnya. Set 0 = tanpa jeda (langsung jalan ke titik berikutnya).
+    LapDelay      = 1.0,                -- detik. Jeda SETELAH selesai SATU putaran (semua waypoint) sebelum mulai putaran berikutnya. Hanya berlaku kalau Loop=true.
+    DelayJitter   = 0,                  -- detik. Nilai random TAMBAHAN ke WaypointDelay & LapDelay (anti-pattern). Contoh 0.5 = delay = base + random(0..0.5). 0 = matikan jitter (delay konsisten).
+
+    -- ── Daftar titik tujuan ──────────────────────────────
+    -- Format: CFrame.new(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+    -- (12 angka: 3 posisi + 9 matriks rotasi). Yang dipakai
+    -- buat MoveTo cuma posisinya, rotasi disimpan kalau-kalau
+    -- nanti mau dipakai untuk teleport-with-rotation.
+    --
+    -- Tinggal tambah/hapus baris di bawah ini sesukamu.
+    Waypoints = {
+        --         X            Y           Z       |  rotation matrix (9 angka)                                                                                                                            | label
+        CFrame.new(-321.205505,  64.9521255, -836.899963,  0.98320967,    0.000419021089, -0.182478964,    0.000745652651, 0.999979794,    0.0063138539,    0.182477921,    -0.00634390814,  0.983189464  ), -- Tujuan a
+        CFrame.new(-347.7883,    64.9051361, -837.501221,  0.998197794,  -8.562969e-09,   -0.0600097403,   8.15448598e-09, 1,             -7.05184755e-09,  0.0600097403,    6.54979004e-09,  0.998197794  ), -- Tujuan b
+        CFrame.new(-337.011414,  64.9051285, -809.512695,  0.194688886,   5.39428946e-08,  0.980865061,   -1.25928054e-07, 1,             -3.00001552e-08, -0.980865061,   -1.17677729e-07,  0.194688886  ), -- Tujuan 1
+        CFrame.new(-317.08551,   64.9051361, -781.268372, -0.98052001,   -3.58415764e-09, -0.19641915,    -1.5666699e-09,  1,             -1.04267155e-08,  0.19641915,    -9.91587878e-09, -0.98052001   ), -- Tujuan 2
+        CFrame.new(-304.390259,  64.9051361, -827.629944,  0.848361373,   1.93074712e-08, -0.529417634,   -9.4901349e-09,  1,              2.12618669e-08,  0.529417634,   -1.30135014e-08,  0.848361373  ), -- Tujuan 3
+        CFrame.new(-307.939484,  64.9051361, -838.643616,  0.627696812,  -9.30847577e-08, -0.77845788,     2.59960586e-08, 1,             -9.86143505e-08,  0.77845788,     4.16630748e-08,  0.627696812  ), -- Tujuan 4
+    },
+
+}
+
+-- ── [KATEGORI 4] LOOP TIMING ───────────────────────────────
+-- Kontrol seberapa cepat script ngecek state UI game (untuk Skip).
+local LOOP_INTERVAL       = 0.5   -- detik. Jeda antar iterasi loop utama Skip.
+local AUTOSKIP_COOLDOWN   = 2.0   -- detik. Cooldown setelah klik AutoSkip.
+local MANUAL_COOLDOWN     = 1.2   -- detik. Cooldown klik Skip Wave (cegah double-click).
+local SPEED_APPLY_TIMEOUT = 30    -- detik. Berapa lama nungguin tombol TickSpeed muncul saat startup.
+
+-- ── [KATEGORI 5] DEBUG ─────────────────────────────────────
+local DEBUG_PRINT = true          -- true = print log ke F9 console. false = silent.
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  CLAMP / VALIDASI CONFIG                  ║
+-- ╚══════════════════════════════════════════════════════════╝
+do
+    local s = tonumber(SpeedConfig.GameSpeed) or 1
+    if s < 1 then s = 1 end
+    if s > 3 then s = 3 end
+    SpeedConfig.GameSpeed = math.floor(s)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                         SERVICES                          ║
+-- ╚══════════════════════════════════════════════════════════╝
+local CoreGui          = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local Players          = game:GetService("Players")
+local LocalPlayer      = Players.LocalPlayer
+local PlayerGui        = LocalPlayer:WaitForChild("PlayerGui")
+
+local function dprint(...)
+    if DEBUG_PRINT then print("[SkipV9]", ...) end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                          STATE                            ║
+-- ╚══════════════════════════════════════════════════════════╝
+local isRunning            = true
+local lastAutoSkipClickAt  = 0
+local lastManualClickAt    = 0
+local lastSeenWaveControls = nil
+
+-- AutoJalan state (terpisah biar bisa di-toggle independen dari Skip)
+local autoJalanState = {
+    enabled = AutoJalanConfig.AutoJalan,    -- ON/OFF flag
+    running = false,                        -- worker sedang jalan?
+    statusText = "Idle",
+}
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              PATH HELPERS (sudah dikonfirmasi user)       ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function safeChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls
+local function getWaveControls()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "WaveControls")
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls.AutoSkip
+local function getAutoSkipButton()
+    return safeChild(getWaveControls(), "AutoSkip")
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.SkipWave
+local function getSkipWaveFrame()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "SkipWave")
+end
+
+-- Path: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls.TickSpeed.Items.{1|2|3}
+local function getTickSpeedButton(n)
+    local wc    = getWaveControls()
+    local tick  = safeChild(wc, "TickSpeed")
+    local items = safeChild(tick, "Items")
+    if not items then return nil end
+    return items:FindFirstChild(tostring(n))
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║          SAFE CLICK (firesignal/getconnections only)      ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function fireSignals(obj, signalNames)
+    if not obj then return false end
+    local fired = false
+    for _, sig in ipairs(signalNames) do
+        pcall(function()
+            local ev = obj[sig]
+            if not ev then return end
+            if typeof(getconnections) == "function" then
+                local conns = getconnections(ev)
+                if conns then
+                    for _, c in ipairs(conns) do
+                        local ok = pcall(function() c:Fire() end)
+                        if not ok and typeof(firesignal) == "function" then
+                            pcall(function() firesignal(c) end)
+                        end
+                        fired = true
+                    end
+                end
+            end
+            if (not fired) and typeof(firesignal) == "function" then
+                pcall(function() firesignal(ev) end)
+                fired = true
+            end
+        end)
+    end
+    return fired
+end
+
+local function safeClick(button)
+    if not button or not button.Parent then return false end
+    local SIGNALS = { "MouseButton1Click", "Activated" }
+    local fired = fireSignals(button, SIGNALS)
+    local title = button:FindFirstChild("Title")
+    if title and (title:IsA("TextLabel") or title:IsA("ImageLabel")
+                  or title:IsA("TextButton") or title:IsA("ImageButton")) then
+        if fireSignals(title, SIGNALS) then fired = true end
+    end
+    return fired
+end
+
+local function applyGameSpeed(n)
+    local btn = getTickSpeedButton(n)
+    if not btn then return false end
+    return safeClick(btn)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  AUTO JALAN HELPERS                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Helper untuk dapat character + humanoid + HRP (ulang setiap
+-- kali dipanggil supaya handle respawn).
+local function getCharacterParts()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local hrp  = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 10)
+    local hum  = char:FindFirstChildOfClass("Humanoid")  or char:WaitForChild("Humanoid", 10)
+    return char, hrp, hum
+end
+
+-- Walk ke 1 waypoint dengan timeout + cancel-able.
+-- Return true kalau sampai, false kalau timeout/canceled.
+local function walkToWaypointSafe(targetPos)
+    local char, hrp, hum = getCharacterParts()
+    if not (hrp and hum) then return false end
+
+    hum:MoveTo(targetPos)
+    local startTime = os.clock()
+    while autoJalanState.running and isRunning do
+        if not (hrp.Parent and hum.Parent) then
+            -- karakter respawn / mati saat jalan
+            return false
+        end
+        local dist = (hrp.Position - targetPos).Magnitude
+        if dist <= AutoJalanConfig.ArriveDist then return true end
+        if (os.clock() - startTime) > AutoJalanConfig.MoveTimeout then
+            dprint("Walk timeout di", targetPos)
+            return false
+        end
+        task.wait(0.2)
+    end
+    return false
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║          GUI (PERSIS pattern AutoReplayV5/V7)             ║
+-- ╚══════════════════════════════════════════════════════════╝
+if CoreGui:FindFirstChild("SkipPanelV9") then
+    CoreGui.SkipPanelV9:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SkipPanelV9"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 280, 0, 320)
+MainFrame.Position = UDim2.new(1, -290, 0.5, -160)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+-- TopBar = Frame (pattern AutoReplayV5)
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Skip V9 (+ Delay Config)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+-- Auto Skip toggle
+local AutoSkipBtn = Instance.new("TextButton")
+AutoSkipBtn.Size = UDim2.new(0.8, 0, 0, 28)
+AutoSkipBtn.Position = UDim2.new(0.1, 0, 0, 8)
+AutoSkipBtn.BackgroundColor3 = Config.AutoSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+AutoSkipBtn.Text = "Auto Skip: " .. (Config.AutoSkip and "ON" or "OFF")
+AutoSkipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AutoSkipBtn.Font = Enum.Font.GothamBold
+AutoSkipBtn.TextSize = 13
+AutoSkipBtn.AutoButtonColor = false
+AutoSkipBtn.Parent = ContentFrame
+Instance.new("UICorner", AutoSkipBtn).CornerRadius = UDim.new(0, 6)
+
+-- Manual Skip toggle
+local ManualSkipBtn = Instance.new("TextButton")
+ManualSkipBtn.Size = UDim2.new(0.8, 0, 0, 28)
+ManualSkipBtn.Position = UDim2.new(0.1, 0, 0, 42)
+ManualSkipBtn.BackgroundColor3 = Config.ManualSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ManualSkipBtn.Text = "Manual Skip: " .. (Config.ManualSkip and "ON" or "OFF")
+ManualSkipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ManualSkipBtn.Font = Enum.Font.GothamBold
+ManualSkipBtn.TextSize = 13
+ManualSkipBtn.AutoButtonColor = false
+ManualSkipBtn.Parent = ContentFrame
+Instance.new("UICorner", ManualSkipBtn).CornerRadius = UDim.new(0, 6)
+
+-- Auto Jalan toggle
+local AutoJalanBtn = Instance.new("TextButton")
+AutoJalanBtn.Size = UDim2.new(0.8, 0, 0, 28)
+AutoJalanBtn.Position = UDim2.new(0.1, 0, 0, 76)
+AutoJalanBtn.BackgroundColor3 = autoJalanState.enabled and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+AutoJalanBtn.Text = "Auto Jalan: " .. (autoJalanState.enabled and "ON" or "OFF")
+AutoJalanBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AutoJalanBtn.Font = Enum.Font.GothamBold
+AutoJalanBtn.TextSize = 13
+AutoJalanBtn.AutoButtonColor = false
+AutoJalanBtn.Parent = ContentFrame
+Instance.new("UICorner", AutoJalanBtn).CornerRadius = UDim.new(0, 6)
+
+-- Game Speed label
+local SpeedLbl = Instance.new("TextLabel")
+SpeedLbl.Size = UDim2.new(0.8, 0, 0, 18)
+SpeedLbl.Position = UDim2.new(0.1, 0, 0, 112)
+SpeedLbl.BackgroundTransparency = 1
+SpeedLbl.Text = "Game Speed (max 3x)"
+SpeedLbl.TextColor3 = Color3.fromRGB(200, 200, 210)
+SpeedLbl.Font = Enum.Font.Gotham
+SpeedLbl.TextSize = 11
+SpeedLbl.TextXAlignment = Enum.TextXAlignment.Left
+SpeedLbl.Parent = ContentFrame
+
+-- Speed buttons (1x, 2x, 3x)
+local Speed1Btn = Instance.new("TextButton")
+Speed1Btn.Size = UDim2.new(0, 70, 0, 28)
+Speed1Btn.Position = UDim2.new(0.1, 0, 0, 132)
+Speed1Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 1) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+Speed1Btn.Text = "1x"
+Speed1Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Speed1Btn.Font = Enum.Font.GothamBold
+Speed1Btn.TextSize = 13
+Speed1Btn.AutoButtonColor = false
+Speed1Btn.Parent = ContentFrame
+Instance.new("UICorner", Speed1Btn).CornerRadius = UDim.new(0, 6)
+
+local Speed2Btn = Instance.new("TextButton")
+Speed2Btn.Size = UDim2.new(0, 70, 0, 28)
+Speed2Btn.Position = UDim2.new(0.5, -35, 0, 132)
+Speed2Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 2) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+Speed2Btn.Text = "2x"
+Speed2Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Speed2Btn.Font = Enum.Font.GothamBold
+Speed2Btn.TextSize = 13
+Speed2Btn.AutoButtonColor = false
+Speed2Btn.Parent = ContentFrame
+Instance.new("UICorner", Speed2Btn).CornerRadius = UDim.new(0, 6)
+
+local Speed3Btn = Instance.new("TextButton")
+Speed3Btn.Size = UDim2.new(0, 70, 0, 28)
+Speed3Btn.Position = UDim2.new(0.9, -70, 0, 132)
+Speed3Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 3) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+Speed3Btn.Text = "3x"
+Speed3Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Speed3Btn.Font = Enum.Font.GothamBold
+Speed3Btn.TextSize = 13
+Speed3Btn.AutoButtonColor = false
+Speed3Btn.Parent = ContentFrame
+Instance.new("UICorner", Speed3Btn).CornerRadius = UDim.new(0, 6)
+
+-- Status Skip
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size = UDim2.new(1, -20, 0, 36)
+StatusLbl.Position = UDim2.new(0, 10, 0, 172)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text = "Skip Status: Loading..."
+StatusLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+StatusLbl.Font = Enum.Font.Gotham
+StatusLbl.TextSize = 11
+StatusLbl.TextWrapped = true
+StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+StatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+StatusLbl.Parent = ContentFrame
+
+-- Status AutoJalan (terpisah biar gampang dibaca)
+local JalanStatusLbl = Instance.new("TextLabel")
+JalanStatusLbl.Size = UDim2.new(1, -20, 0, 36)
+JalanStatusLbl.Position = UDim2.new(0, 10, 0, 210)
+JalanStatusLbl.BackgroundTransparency = 1
+JalanStatusLbl.Text = "Jalan Status: Idle"
+JalanStatusLbl.TextColor3 = Color3.fromRGB(220, 200, 150)
+JalanStatusLbl.Font = Enum.Font.Gotham
+JalanStatusLbl.TextSize = 11
+JalanStatusLbl.TextWrapped = true
+JalanStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+JalanStatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+JalanStatusLbl.Parent = ContentFrame
+
+local function setSkipStatus(s)
+    StatusLbl.Text = "Skip Status: " .. tostring(s)
+end
+
+local function setJalanStatus(s)
+    autoJalanState.statusText = tostring(s)
+    JalanStatusLbl.Text = "Jalan Status: " .. tostring(s)
+end
+
+local function refreshSpeedButtons()
+    Speed1Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 1) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+    Speed2Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 2) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+    Speed3Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 3) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║         DRAG (PERSIS pattern AutoReplayV5/V7)             ║
+-- ╚══════════════════════════════════════════════════════════╝
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging  = true
+        dragStart = input.Position
+        startPos  = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                     BUTTON HANDLERS                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentFrame.Visible = not minimized
+    MainFrame.Size = minimized and UDim2.new(0, 280, 0, 30) or UDim2.new(0, 280, 0, 320)
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    autoJalanState.enabled = false
+    autoJalanState.running = false
+    ScreenGui:Destroy()
+end)
+
+AutoSkipBtn.MouseButton1Click:Connect(function()
+    Config.AutoSkip = not Config.AutoSkip
+    AutoSkipBtn.BackgroundColor3 = Config.AutoSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    AutoSkipBtn.Text = "Auto Skip: " .. (Config.AutoSkip and "ON" or "OFF")
+end)
+
+ManualSkipBtn.MouseButton1Click:Connect(function()
+    Config.ManualSkip = not Config.ManualSkip
+    ManualSkipBtn.BackgroundColor3 = Config.ManualSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    ManualSkipBtn.Text = "Manual Skip: " .. (Config.ManualSkip and "ON" or "OFF")
+end)
+
+AutoJalanBtn.MouseButton1Click:Connect(function()
+    autoJalanState.enabled = not autoJalanState.enabled
+    AutoJalanBtn.BackgroundColor3 = autoJalanState.enabled and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    AutoJalanBtn.Text = "Auto Jalan: " .. (autoJalanState.enabled and "ON" or "OFF")
+    if not autoJalanState.enabled then
+        autoJalanState.running = false  -- akan dihentikan di iterasi berikutnya
+        setJalanStatus("Stopped by user.")
+    end
+end)
+
+Speed1Btn.MouseButton1Click:Connect(function()
+    SpeedConfig.GameSpeed = 1
+    refreshSpeedButtons()
+    applyGameSpeed(1)
+end)
+Speed2Btn.MouseButton1Click:Connect(function()
+    SpeedConfig.GameSpeed = 2
+    refreshSpeedButtons()
+    applyGameSpeed(2)
+end)
+Speed3Btn.MouseButton1Click:Connect(function()
+    SpeedConfig.GameSpeed = 3
+    refreshSpeedButtons()
+    applyGameSpeed(3)
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║   AUTO-APPLY GameSpeed di awal eksekusi (sesuai Config)   ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    local startedAt = os.clock()
+    while isRunning and (os.clock() - startedAt) < SPEED_APPLY_TIMEOUT do
+        if applyGameSpeed(SpeedConfig.GameSpeed) then
+            setSkipStatus("Initial Speed -> " .. SpeedConfig.GameSpeed .. "x ter-apply.")
+            return
+        end
+        task.wait(1)
+    end
+    setSkipStatus("Initial speed timeout. Akan retry saat round mulai.")
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                MAIN LOOP - SKIP (dari V7)                 ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        task.wait(LOOP_INTERVAL)
+        if not isRunning then break end
+
+        local ok, err = pcall(function()
+            local now = os.clock()
+            local statusParts = {}
+            local wc = getWaveControls()
+
+            -- Re-apply speed saat round baru
+            if wc and wc ~= lastSeenWaveControls then
+                if lastSeenWaveControls ~= nil then
+                    dprint("Round baru, re-apply speed.")
+                    task.spawn(function()
+                        task.wait(0.5)
+                        applyGameSpeed(SpeedConfig.GameSpeed)
+                    end)
+                    table.insert(statusParts, "Re-apply " .. SpeedConfig.GameSpeed .. "x")
+                end
+                lastSeenWaveControls = wc
+            end
+
+            if not wc then
+                setSkipStatus("Standby (bukan di gameplay).")
+                return
+            end
+
+            -- AUTO SKIP
+            if Config.AutoSkip and (now - lastAutoSkipClickAt) >= AUTOSKIP_COOLDOWN then
+                local btn = getAutoSkipButton()
+                local titleLabel = btn and btn:FindFirstChild("Title")
+                local titleText = (titleLabel and titleLabel:IsA("TextLabel")) and titleLabel.Text or ""
+                if btn and string.find(string.lower(titleText), "off") then
+                    if safeClick(btn) then
+                        lastAutoSkipClickAt = os.clock()
+                        table.insert(statusParts, "AutoSkip clicked")
+                    end
+                end
+            end
+
+            -- MANUAL SKIP
+            if Config.ManualSkip and (now - lastManualClickAt) >= MANUAL_COOLDOWN then
+                local frame = getSkipWaveFrame()
+                if frame and frame.Visible then
+                    local mbtn = frame:FindFirstChild("Button")
+                    if mbtn then
+                        if safeClick(mbtn) then
+                            table.insert(statusParts, "SkipWave clicked")
+                            lastManualClickAt = os.clock()
+                        end
+                    end
+                end
+            end
+
+            if #statusParts == 0 then
+                setSkipStatus("Watching... AS=" .. tostring(Config.AutoSkip)
+                    .. " MS=" .. tostring(Config.ManualSkip)
+                    .. " Speed=" .. SpeedConfig.GameSpeed .. "x")
+            else
+                setSkipStatus(table.concat(statusParts, " | "))
+            end
+        end)
+
+        if not ok then
+            dprint("Iterasi Skip error:", err)
+        end
+    end
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  AUTO JALAN WORKER                        ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Worker terpisah. Cek flag autoJalanState.enabled supaya bisa
+-- toggle on/off via GUI tanpa kill seluruh script.
+print("Jalan Bos")
+
+task.spawn(function()
+    -- Place ID guard (kalau diset > 0)
+    if AutoJalanConfig.PlaceIdGuard and AutoJalanConfig.PlaceIdGuard ~= 0 then
+        if game.PlaceId ~= AutoJalanConfig.PlaceIdGuard then
+            setJalanStatus("PlaceId beda (" .. tostring(game.PlaceId) .. "), Auto Jalan dinonaktifkan.")
+            return
+        end
+    end
+
+    -- Tunggu game loaded
+    repeat task.wait() until game:IsLoaded()
+    repeat task.wait() until game:GetService("Players")
+    repeat task.wait() until game:GetService("Players").LocalPlayer
+
+    -- Startup delay (kasih waktu game/karakter loading)
+    setJalanStatus("Tunggu " .. AutoJalanConfig.StartDelay .. "s sebelum mulai...")
+    task.wait(AutoJalanConfig.StartDelay)
+
+    print("auto walk")
+    setJalanStatus("Siap. Menunggu toggle ON.")
+
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        if autoJalanState.enabled and not autoJalanState.running then
+            -- Mulai walk loop
+            autoJalanState.running = true
+            setJalanStatus("Start walking...")
+
+            local lap = 0
+            while autoJalanState.enabled and autoJalanState.running and isRunning do
+                lap = lap + 1
+                local total = #AutoJalanConfig.Waypoints
+                for i, waypoint in ipairs(AutoJalanConfig.Waypoints) do
+                    if not (autoJalanState.enabled and autoJalanState.running and isRunning) then break end
+                    setJalanStatus(string.format("Lap %d: jalan ke waypoint %d/%d", lap, i, total))
+                    walkToWaypointSafe(waypoint.Position)
+
+                    -- Jeda antar waypoint (config WaypointDelay + DelayJitter random)
+                    if i < total and autoJalanState.enabled and autoJalanState.running and isRunning then
+                        local jitter = (AutoJalanConfig.DelayJitter or 0) > 0
+                            and math.random() * AutoJalanConfig.DelayJitter
+                            or 0
+                        local delay = (AutoJalanConfig.WaypointDelay or 0) + jitter
+                        if delay > 0 then
+                            setJalanStatus(string.format("Lap %d: jeda %.2fs sebelum waypoint %d", lap, delay, i + 1))
+                            task.wait(delay)
+                        end
+                    end
+                end
+
+                if not AutoJalanConfig.Loop then
+                    setJalanStatus("Selesai 1 putaran (Loop=false). Stop.")
+                    autoJalanState.enabled = false
+                    autoJalanState.running = false
+                    AutoJalanBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+                    AutoJalanBtn.Text = "Auto Jalan: OFF"
+                    break
+                end
+
+                if not autoJalanState.enabled then break end
+
+                -- Jeda antar lap (config LapDelay + DelayJitter random)
+                local jitterLap = (AutoJalanConfig.DelayJitter or 0) > 0
+                    and math.random() * AutoJalanConfig.DelayJitter
+                    or 0
+                local lapDelay = (AutoJalanConfig.LapDelay or 0) + jitterLap
+                setJalanStatus(string.format("Lap %d selesai. Jeda %.2fs sebelum lap berikutnya...", lap, lapDelay))
+                if lapDelay > 0 then task.wait(lapDelay) end
+            end
+
+            autoJalanState.running = false
+            if not autoJalanState.enabled then
+                setJalanStatus("Stopped.")
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+
+print(string.format(
+    "[SkipV9] Loaded. AutoSkip=%s | ManualSkip=%s | GameSpeed=%dx | AutoJalan=%s | Waypoints=%d | WPDelay=%.2fs | LapDelay=%.2fs",
+    tostring(Config.AutoSkip),
+    tostring(Config.ManualSkip),
+    SpeedConfig.GameSpeed,
+    tostring(autoJalanState.enabled),
+    #AutoJalanConfig.Waypoints,
+    AutoJalanConfig.WaypointDelay or 0,
+    AutoJalanConfig.LapDelay or 0
+))
