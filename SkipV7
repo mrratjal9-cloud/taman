@@ -44,7 +44,7 @@
 -- Pengaturan utama: fitur mana yang aktif saat script di-load.
 local Config = {
     AutoSkip   = true,    -- true = saat eksekusi langsung NYALAKAN tombol "Auto Skip" di game (klik kalau lagi Off). false = jangan otak-atik.
-    ManualSkip = true,    -- true = saat eksekusi otomatis klik "Skip Wave >>" tiap kali frame SkipWave muncul. false = nonaktif.
+    ManualSkip = false,    -- true = saat eksekusi otomatis klik "Skip Wave >>" tiap kali frame SkipWave muncul. false = nonaktif.
 }
 
 -- ── [KATEGORI 2] GAME SPEED (Tick Speed) ───────────────────
