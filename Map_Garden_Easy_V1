@@ -36,7 +36,7 @@ local scriptsByPlaceId = {
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AntiDC_V1"
     },
     [LOBBY_PLACE_ID] = {
-        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoJoin_Map_Garden_V1", -- auto join lobby
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoJoin_Map_Grdn_V1", -- auto join lobby
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/ANTI_AFK",
         "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AntiDC_V1"
     }
