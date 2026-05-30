@@ -1,0 +1,55 @@
+wait(1)
+print("Full Script Is Running")
+
+-- Fungsi untuk mengeksekusi script
+local function executeScripts(scripts)
+    if not scripts or #scripts == 0 then return end
+    
+    for _, scriptUrl in ipairs(scripts) do
+        local co = coroutine.create(function()
+            -- Menambahkan pcall untuk keamanan jika link github mati/bermasalah
+            local success, err = pcall(function()
+                loadstring(game:HttpGet(scriptUrl))()
+            end)
+            
+            if not success then
+                warn("Gagal load script dari: " .. tostring(scriptUrl) .. "\nError: " .. tostring(err))
+            end
+        end)
+        coroutine.resume(co)
+    end
+end
+
+-- Mendefinisikan Place ID
+local INGAME_PLACE_ID = 123516946198836
+local LOBBY_PLACE_ID = 108533757090220
+
+-- Membuat tabel yang memetakan Place ID ke list script masing-masing
+local scriptsByPlaceId = {
+    [INGAME_PLACE_ID] = {
+        --"https://github.com/mrratjal9-cloud/taman/raw/refs/heads/main/ANTI_AFK", --Begini juga bisa
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoUpgrade_map_farm_dif_easy_V2",--upgrade 
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/map_farm_dif_easy_V21",--place unit
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoReplay_Map_Garden_V1",-- replay, jalan, speed, skip
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/LowGrafik_V12",-- low
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/ANTI_AFK",
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AntiDC_V1"
+    },
+    [LOBBY_PLACE_ID] = {
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AutoJoin_Map_Grave_V1", -- auto join lobby
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/ANTI_AFK",
+        "https://raw.githubusercontent.com/mrratjal9-cloud/taman/refs/heads/main/AntiDC_V1"
+    }
+}
+
+-- Mengambil PlaceId saat ini
+local currentPlaceId = game.PlaceId
+print("Current PlaceId: " .. tostring(currentPlaceId))
+
+-- Mengecek apakah PlaceId saat ini ada di dalam tabel script kita
+if scriptsByPlaceId[currentPlaceId] then
+    print("Menjalankan script khusus untuk PlaceId: " .. tostring(currentPlaceId))
+    executeScripts(scriptsByPlaceId[currentPlaceId])
+else
+    warn("Tidak ada list script yang diatur untuk PlaceId ini.")
+end
