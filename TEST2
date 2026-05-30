@@ -1,0 +1,1059 @@
+task.wait(1)
+-- ================================================================
+--          AUTO UPGRADE TOWER - V2 (PARALLEL / MULTI-INSTANCE)
+--          Game: GARDEN TOWER DEFENCE
+-- ================================================================
+-- BARU dari V1:
+--   [NEW 1] Mendukung paralel: jalankan script ini berkali-kali dengan
+--           CONFIG.TargetUnits berbeda. Tiap eksekusi = 1 instance terpisah,
+--           punya GUI sendiri, thread sendiri, state sendiri. Tidak bentrok.
+--   [NEW 2] GUI default MINIMIZED berbentuk badge kecil yg menampilkan
+--           NOMOR instance (1,2,3,...). Hemat tempat di layar.
+--   [NEW 3] Badge tersusun otomatis di "kiri tengah agak ke atas",
+--           stacked vertical ke bawah. Saat ada instance ditutup,
+--           sisa instance otomatis re-layout (rapikan kembali).
+--   [NEW 4] Total instance aktif & nomor instance ditampilkan di header.
+--   [NEW 5] Setiap config diberi penjelasan format
+--           "[KATEGORI] guna: ... | nilai: ... | efek: ..."
+-- ================================================================
+
+
+-- ================================================================
+-- KATEGORI 1 : KONFIGURASI UTAMA (silakan diubah per-instance)
+-- ================================================================
+-- Setiap kali kamu execute script ini, CONFIG di bawah dipakai untuk
+-- INSTANCE itu saja. Mau jalankan paralel dengan unit beda? Tinggal
+-- ubah TargetUnits, lalu execute lagi. Tidak akan timpa instance lama.
+-- ================================================================
+local CONFIG = {
+
+    -- ====== [A] PENGATURAN UPGRADE (kategori: CORE) ======
+    AutoStart       = true,                     -- [CORE]   guna: auto mulai saat script di-load.                          | nilai: true / false.                              | efek: true = langsung jalan tanpa klik tombol; false = nunggu user klik MULAI.
+    UpgradeInterval = 0.01,                     -- [PERF]   guna: jeda antar siklus upgrade (detik).                       | nilai: angka > 0 (rekomendasi 0.01 - 1.0).        | efek: makin kecil makin cepat upgrade tapi makin boros CPU/network.
+    MaxLevel        = 2,                        -- [CORE]   guna: batas level max; unit yg sudah di level ini di-skip.    | nilai: integer >= 1 sesuai max unit di game.       | efek: hemat coin & traffic, mencegah upgrade percuma.
+
+    -- ====== [B] TARGET UNIT (kategori: CORE - WAJIB BEDA per-instance) ======
+    TargetUnits     = {"unit_money_tree"},      -- [CORE]   guna: daftar nama internal unit yg akan di-upgrade.            | nilai: list string case-sensitive (contoh {"unit_tomato_plant"}). | efek: tiap instance paralel sebaiknya pakai unit BEDA agar tidak saling tabrak request server.
+
+    -- ====== [C] PENGATURAN AUTO WAVE (kategori: WAVE) ======
+    WaveControl     = true,                     -- [WAVE]   guna: aktif/non-aktif kontrol otomatis berdasar wave.          | nilai: true / false.                              | efek: true = script otomatis hidup di StartWave & mati di StopWave.
+    StartWave       = 6,                        -- [WAVE]   guna: nomor wave script auto-MULAI.                            | nilai: integer >= 1.                              | efek: jika wave saat ini >= angka ini -> script aktif (sekali per ronde).
+    StopWave        = 9,                        -- [WAVE]   guna: nomor wave script auto-BERHENTI.                         | nilai: integer > StartWave.                       | efek: jika wave saat ini >= angka ini -> script mati otomatis.
+
+    -- ====== [D] GUI MULTI-INSTANCE (kategori: GUI - khusus V2) ======
+    StartMinimized    = true,                   -- [GUI]    guna: GUI default minimize (badge kecil) saat load.            | nilai: true / false.                              | efek: true = hemat tempat saat banyak instance; false = window full langsung muncul.
+    BadgeAnchorX      = 15,                     -- [GUI]    guna: jarak X badge dari sisi kiri layar (pixel).              | nilai: integer >= 0.                              | efek: makin besar = badge makin ke kanan dari tepi kiri.
+    BadgeAnchorYScale = 0.28,                   -- [GUI]    guna: posisi Y badge dalam skala tinggi layar.                | nilai: 0.0 (paling atas) - 1.0 (paling bawah).    | efek: 0.28 ~= "kiri tengah agak ke atas" sesuai permintaan.
+    BadgeStackGap     = 58,                     -- [GUI]    guna: jarak vertikal antar badge bila ada banyak instance.    | nilai: integer >= ukuran badge (>= 50).           | efek: makin besar = badge tidak saling tumpang tindih.
+    BadgeSize         = 50,                     -- [GUI]    guna: ukuran sisi (px) badge persegi saat minimized.           | nilai: integer 40-80.                             | efek: makin besar = nomor instance lebih jelas tapi makan tempat.
+    PanelSize         = {W = 340, H = 480},     -- [GUI]    guna: ukuran panel saat di-MAXIMIZE.                           | nilai: tabel {W=lebar, H=tinggi} pixel.           | efek: ubah jika layar kecil/besar; W >= 300 disarankan.
+}
+
+
+-- ================================================================
+-- KATEGORI 2 : SERVICE & VARIABEL INTERNAL (jangan diubah)
+-- ================================================================
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local UserInputService  = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+
+
+-- ================================================================
+-- KATEGORI 3 : REGISTRY MULTI-INSTANCE (NEW di V2)
+-- ================================================================
+-- Registry global hidup di _G sehingga semua execute script V2 berbagi
+-- tabel yg sama. Tiap instance daftar diri ke registry, dapat nomor
+-- slot, dan auto-rapikan saat ada yg keluar.
+-- ================================================================
+if not _G.AutoUpgradeRegistry_V2 then
+    _G.AutoUpgradeRegistry_V2 = {
+        instances = {},   -- list of instance entries
+        nextId    = 0,    -- counter id unik (tidak pernah turun)
+    }
+end
+local Registry = _G.AutoUpgradeRegistry_V2
+
+Registry.nextId = Registry.nextId + 1
+local MY_ID   = Registry.nextId
+local MY_SLOT = #Registry.instances + 1   -- urutan tampilan saat lahir
+
+-- Forward declaration: fungsi-fungsi yg saling memanggil
+local relayoutAllInstances
+local refreshHeaderText
+local updateBadgeText
+
+-- Entry instance ini
+local instanceEntry = {
+    id        = MY_ID,
+    slot      = MY_SLOT,
+    target    = CONFIG.TargetUnits,
+    isRunning = false,
+    minimized = CONFIG.StartMinimized,
+    -- callback hooks (akan diisi setelah GUI dibuat)
+    onSlotChanged = nil,
+    destroy       = nil,
+}
+table.insert(Registry.instances, instanceEntry)
+
+
+-- ================================================================
+-- KATEGORI 4 : STATE / FLAG INTERNAL
+-- ================================================================
+local isRunning      = false
+local isMinimized    = CONFIG.StartMinimized
+local scriptThread   = nil
+local logLines       = {}
+local MAX_LOG        = 50
+local lastWaveNum    = -1
+local hasAutoStarted = false
+local hasAutoStopped = false
+
+local runUpgrader     -- forward decl
+local toggleScript    -- forward decl
+
+-- Bersihkan GUI lama dengan ID yg sama (defensif; harusnya tidak kena)
+local GUI_NAME = "AutoUpgradeGUI_V2_" .. MY_ID
+if PlayerGui:FindFirstChild(GUI_NAME) then
+    PlayerGui:FindFirstChild(GUI_NAME):Destroy()
+end
+
+
+-- ================================================================
+-- KATEGORI 5 : BUILD GUI
+-- ================================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = GUI_NAME
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
+
+-- ====== ROOT FRAME (jadi badge saat minimized, jadi panel saat expand) ======
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = false
+MainFrame.Parent = ScreenGui
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 10)
+
+-- Helper hitung posisi Y badge berdasar slot
+local function calcBadgePos(slot)
+    return UDim2.new(
+        0, CONFIG.BadgeAnchorX,
+        CONFIG.BadgeAnchorYScale, (slot - 1) * CONFIG.BadgeStackGap
+    )
+end
+
+-- Set ukuran & posisi awal sesuai mode
+local function applyMode(animated)
+    if isMinimized then
+        local size = UDim2.new(0, CONFIG.BadgeSize, 0, CONFIG.BadgeSize)
+        local pos  = calcBadgePos(instanceEntry.slot)
+        if animated then
+            TweenService:Create(MainFrame, TweenInfo.new(0.22, Enum.EasingStyle.Quart),
+                {Size = size, Position = pos}):Play()
+        else
+            MainFrame.Size = size
+            MainFrame.Position = pos
+        end
+    else
+        local size = UDim2.new(0, CONFIG.PanelSize.W, 0, CONFIG.PanelSize.H)
+        -- saat expand, posisi tetap mulai dari titik badge supaya tidak "loncat" ke tengah
+        local pos  = calcBadgePos(instanceEntry.slot)
+        if animated then
+            TweenService:Create(MainFrame, TweenInfo.new(0.22, Enum.EasingStyle.Quart),
+                {Size = size, Position = pos}):Play()
+        else
+            MainFrame.Size = size
+            MainFrame.Position = pos
+        end
+    end
+end
+
+
+-- ================================================================
+-- KATEGORI 5.A : BADGE LAYER (terlihat saat minimized)
+-- ================================================================
+local BadgeLayer = Instance.new("Frame")
+BadgeLayer.Name = "BadgeLayer"
+BadgeLayer.Size = UDim2.new(1, 0, 1, 0)
+BadgeLayer.BackgroundTransparency = 1
+BadgeLayer.Parent = MainFrame
+
+-- nomor besar di tengah badge
+local BadgeNumber = Instance.new("TextLabel")
+BadgeNumber.Size = UDim2.new(1, 0, 1, -10)
+BadgeNumber.Position = UDim2.new(0, 0, 0, 0)
+BadgeNumber.BackgroundTransparency = 1
+BadgeNumber.Text = tostring(instanceEntry.slot)
+BadgeNumber.TextColor3 = Color3.fromRGB(255, 255, 255)
+BadgeNumber.Font = Enum.Font.GothamBlack
+BadgeNumber.TextScaled = true
+BadgeNumber.Parent = BadgeLayer
+
+-- dot status kecil di pojok kanan-atas badge
+local BadgeStatusDot = Instance.new("Frame")
+BadgeStatusDot.Size = UDim2.new(0, 8, 0, 8)
+BadgeStatusDot.Position = UDim2.new(1, -12, 0, 6)
+BadgeStatusDot.BackgroundColor3 = Color3.fromRGB(120, 120, 120)
+BadgeStatusDot.BorderSizePixel = 0
+BadgeStatusDot.Parent = BadgeLayer
+Instance.new("UICorner", BadgeStatusDot).CornerRadius = UDim.new(1, 0)
+
+-- subtitle target pertama (preview unit pada badge)
+local BadgeSubText = Instance.new("TextLabel")
+BadgeSubText.Size = UDim2.new(1, -4, 0, 10)
+BadgeSubText.Position = UDim2.new(0, 2, 1, -11)
+BadgeSubText.BackgroundTransparency = 1
+BadgeSubText.Text = (CONFIG.TargetUnits[1] or "?"):sub(1, 9)
+BadgeSubText.TextColor3 = Color3.fromRGB(150, 200, 255)
+BadgeSubText.Font = Enum.Font.GothamBold
+BadgeSubText.TextSize = 9
+BadgeSubText.TextTruncate = Enum.TextTruncate.AtEnd
+BadgeSubText.Parent = BadgeLayer
+
+
+-- ================================================================
+-- KATEGORI 5.B : PANEL LAYER (terlihat saat di-maximize)
+-- ================================================================
+local PanelLayer = Instance.new("Frame")
+PanelLayer.Name = "PanelLayer"
+PanelLayer.Size = UDim2.new(1, 0, 1, 0)
+PanelLayer.BackgroundTransparency = 1
+PanelLayer.Visible = not isMinimized
+PanelLayer.Parent = MainFrame
+
+-- ===== Title bar =====
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 38)
+TitleBar.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = PanelLayer
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -100, 1, 0)
+TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Auto Upgrade V2  #" .. instanceEntry.slot
+TitleLabel.TextColor3 = Color3.fromRGB(220, 220, 255)
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 13
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
+
+local BtnContainer = Instance.new("Frame")
+BtnContainer.Size = UDim2.new(0, 70, 0, 22)
+BtnContainer.Position = UDim2.new(1, -80, 0.5, -11)
+BtnContainer.BackgroundTransparency = 1
+BtnContainer.Parent = TitleBar
+
+local function makeWinBtn(pos, col, symbol)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 22, 0, 22)
+    btn.Position = UDim2.new(0, pos, 0, 0)
+    btn.BackgroundColor3 = col
+    btn.Text = symbol
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.BorderSizePixel = 0
+    btn.Parent = BtnContainer
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
+    return btn
+end
+local MinBtn   = makeWinBtn(0,  Color3.fromRGB(200, 150, 40), "-")
+local CloseBtn = makeWinBtn(28, Color3.fromRGB(200, 50, 50),  "X")
+
+-- ===== Body =====
+local Body = Instance.new("Frame")
+Body.Size = UDim2.new(1, 0, 1, -38)
+Body.Position = UDim2.new(0, 0, 0, 38)
+Body.BackgroundTransparency = 1
+Body.ClipsDescendants = false
+Body.Parent = PanelLayer
+
+local BodyLayout = Instance.new("UIListLayout")
+BodyLayout.Padding = UDim.new(0, 6)
+BodyLayout.FillDirection = Enum.FillDirection.Vertical
+BodyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+BodyLayout.Parent = Body
+
+local BodyPad = Instance.new("UIPadding")
+BodyPad.PaddingTop = UDim.new(0, 8)
+BodyPad.PaddingLeft = UDim.new(0, 10)
+BodyPad.PaddingRight = UDim.new(0, 10)
+BodyPad.Parent = Body
+
+-- Status card
+local StatusCard = Instance.new("Frame")
+StatusCard.Size = UDim2.new(1, 0, 0, 80)
+StatusCard.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+StatusCard.BorderSizePixel = 0
+StatusCard.Parent = Body
+Instance.new("UICorner", StatusCard).CornerRadius = UDim.new(0, 8)
+
+local StatusDot = Instance.new("Frame")
+StatusDot.Size = UDim2.new(0, 10, 0, 10)
+StatusDot.Position = UDim2.new(0, 12, 0, 14)
+StatusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+StatusDot.BorderSizePixel = 0
+StatusDot.Parent = StatusCard
+Instance.new("UICorner", StatusDot).CornerRadius = UDim.new(1, 0)
+
+local StatusText = Instance.new("TextLabel")
+StatusText.Size = UDim2.new(1, -100, 0, 18)
+StatusText.Position = UDim2.new(0, 30, 0, 10)
+StatusText.BackgroundTransparency = 1
+StatusText.Text = "Status: Mati"
+StatusText.TextColor3 = Color3.fromRGB(200, 200, 200)
+StatusText.Font = Enum.Font.GothamBold
+StatusText.TextSize = 13
+StatusText.TextXAlignment = Enum.TextXAlignment.Left
+StatusText.Parent = StatusCard
+
+local CountText = Instance.new("TextLabel")
+CountText.Size = UDim2.new(1, -30, 0, 14)
+CountText.Position = UDim2.new(0, 30, 0, 30)
+CountText.BackgroundTransparency = 1
+CountText.Text = "Butuh Upg: 0 | Max: 0"
+CountText.TextColor3 = Color3.fromRGB(120, 120, 150)
+CountText.Font = Enum.Font.Gotham
+CountText.TextSize = 10
+CountText.TextXAlignment = Enum.TextXAlignment.Left
+CountText.Parent = StatusCard
+
+local WaveTextDisplay = Instance.new("TextLabel")
+WaveTextDisplay.Size = UDim2.new(1, -30, 0, 14)
+WaveTextDisplay.Position = UDim2.new(0, 30, 0, 46)
+WaveTextDisplay.BackgroundTransparency = 1
+WaveTextDisplay.Text = "Wave: Mendeteksi..."
+WaveTextDisplay.TextColor3 = Color3.fromRGB(150, 200, 255)
+WaveTextDisplay.Font = Enum.Font.GothamBold
+WaveTextDisplay.TextSize = 10
+WaveTextDisplay.TextXAlignment = Enum.TextXAlignment.Left
+WaveTextDisplay.Parent = StatusCard
+
+-- info instance (NEW di V2)
+local InstanceInfoText = Instance.new("TextLabel")
+InstanceInfoText.Size = UDim2.new(1, -30, 0, 14)
+InstanceInfoText.Position = UDim2.new(0, 30, 0, 62)
+InstanceInfoText.BackgroundTransparency = 1
+InstanceInfoText.Text = "Instance #" .. instanceEntry.slot .. " / Total: 1"
+InstanceInfoText.TextColor3 = Color3.fromRGB(255, 200, 100)
+InstanceInfoText.Font = Enum.Font.GothamBold
+InstanceInfoText.TextSize = 10
+InstanceInfoText.TextXAlignment = Enum.TextXAlignment.Left
+InstanceInfoText.Parent = StatusCard
+
+-- Toggle button
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(1, 0, 0, 38)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 60)
+ToggleBtn.Text = "MULAI UPGRADE"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 13
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.Parent = Body
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 8)
+
+-- Config card
+local CfgCard = Instance.new("Frame")
+CfgCard.Size = UDim2.new(1, 0, 0, 105)
+CfgCard.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+CfgCard.BorderSizePixel = 0
+CfgCard.ClipsDescendants = false
+CfgCard.Parent = Body
+Instance.new("UICorner", CfgCard).CornerRadius = UDim.new(0, 8)
+
+local DelayLabel = Instance.new("TextLabel")
+DelayLabel.Size = UDim2.new(0, 70, 0, 18)
+DelayLabel.Position = UDim2.new(0, 10, 0, 10)
+DelayLabel.BackgroundTransparency = 1
+DelayLabel.Text = "Jeda: " .. CONFIG.UpgradeInterval .. "s"
+DelayLabel.TextColor3 = Color3.fromRGB(140, 140, 170)
+DelayLabel.Font = Enum.Font.Gotham
+DelayLabel.TextSize = 10
+DelayLabel.TextXAlignment = Enum.TextXAlignment.Left
+DelayLabel.Parent = CfgCard
+
+local MaxLvlLabel = Instance.new("TextLabel")
+MaxLvlLabel.Size = UDim2.new(0, 70, 0, 18)
+MaxLvlLabel.Position = UDim2.new(0.5, 10, 0, 10)
+MaxLvlLabel.BackgroundTransparency = 1
+MaxLvlLabel.Text = "Max Lvl:"
+MaxLvlLabel.TextColor3 = Color3.fromRGB(140, 140, 170)
+MaxLvlLabel.Font = Enum.Font.Gotham
+MaxLvlLabel.TextSize = 10
+MaxLvlLabel.TextXAlignment = Enum.TextXAlignment.Left
+MaxLvlLabel.Parent = CfgCard
+
+local function makeSmallBtn(xOff, label, parent)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 22, 0, 18)
+    b.Position = xOff
+    b.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    b.Text = label
+    b.TextColor3 = Color3.fromRGB(200, 200, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.BorderSizePixel = 0
+    b.Parent = parent
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+    return b
+end
+local DelayMinus = makeSmallBtn(UDim2.new(0, 65, 0, 10), "-", CfgCard)
+local DelayPlus  = makeSmallBtn(UDim2.new(0, 90, 0, 10), "+", CfgCard)
+
+local MaxLvlBox = Instance.new("TextBox")
+MaxLvlBox.Size = UDim2.new(0, 30, 0, 18)
+MaxLvlBox.Position = UDim2.new(0.5, 60, 0, 10)
+MaxLvlBox.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+MaxLvlBox.Text = tostring(CONFIG.MaxLevel)
+MaxLvlBox.TextColor3 = Color3.fromRGB(255, 200, 100)
+MaxLvlBox.Font = Enum.Font.GothamBold
+MaxLvlBox.TextSize = 10
+MaxLvlBox.Parent = CfgCard
+Instance.new("UICorner", MaxLvlBox).CornerRadius = UDim.new(0, 4)
+
+local WaveControlToggle = Instance.new("TextButton")
+WaveControlToggle.Size = UDim2.new(0.4, 0, 0, 18)
+WaveControlToggle.Position = UDim2.new(0, 10, 0, 40)
+WaveControlToggle.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+WaveControlToggle.Font = Enum.Font.GothamBold
+WaveControlToggle.TextSize = 10
+WaveControlToggle.BorderSizePixel = 0
+WaveControlToggle.Parent = CfgCard
+Instance.new("UICorner", WaveControlToggle).CornerRadius = UDim.new(0, 4)
+
+local StartWaveLabel = Instance.new("TextLabel")
+StartWaveLabel.Size = UDim2.new(0, 30, 0, 18)
+StartWaveLabel.Position = UDim2.new(0.45, 5, 0, 40)
+StartWaveLabel.BackgroundTransparency = 1
+StartWaveLabel.Text = "Mulai:"
+StartWaveLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+StartWaveLabel.Font = Enum.Font.Gotham
+StartWaveLabel.TextSize = 10
+StartWaveLabel.Parent = CfgCard
+
+local StartWaveBox = Instance.new("TextBox")
+StartWaveBox.Size = UDim2.new(0, 30, 0, 18)
+StartWaveBox.Position = UDim2.new(0.45, 35, 0, 40)
+StartWaveBox.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+StartWaveBox.Text = tostring(CONFIG.StartWave)
+StartWaveBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+StartWaveBox.Font = Enum.Font.GothamBold
+StartWaveBox.TextSize = 10
+StartWaveBox.Parent = CfgCard
+Instance.new("UICorner", StartWaveBox).CornerRadius = UDim.new(0, 4)
+
+local StopWaveLabel = Instance.new("TextLabel")
+StopWaveLabel.Size = UDim2.new(0, 30, 0, 18)
+StopWaveLabel.Position = UDim2.new(0.45, 75, 0, 40)
+StopWaveLabel.BackgroundTransparency = 1
+StopWaveLabel.Text = "Mati:"
+StopWaveLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+StopWaveLabel.Font = Enum.Font.Gotham
+StopWaveLabel.TextSize = 10
+StopWaveLabel.Parent = CfgCard
+
+local StopWaveBox = Instance.new("TextBox")
+StopWaveBox.Size = UDim2.new(0, 30, 0, 18)
+StopWaveBox.Position = UDim2.new(0.45, 105, 0, 40)
+StopWaveBox.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+StopWaveBox.Text = tostring(CONFIG.StopWave)
+StopWaveBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+StopWaveBox.Font = Enum.Font.GothamBold
+StopWaveBox.TextSize = 10
+StopWaveBox.Parent = CfgCard
+Instance.new("UICorner", StopWaveBox).CornerRadius = UDim.new(0, 4)
+
+-- Target dropdown
+local TargetDropdownBtn = Instance.new("TextButton")
+TargetDropdownBtn.Size = UDim2.new(1, -20, 0, 22)
+TargetDropdownBtn.Position = UDim2.new(0, 10, 0, 70)
+TargetDropdownBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+TargetDropdownBtn.Text = "Sinkronisasi Data..."
+TargetDropdownBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+TargetDropdownBtn.Font = Enum.Font.GothamBold
+TargetDropdownBtn.TextSize = 10
+TargetDropdownBtn.BorderSizePixel = 0
+TargetDropdownBtn.Parent = CfgCard
+Instance.new("UICorner", TargetDropdownBtn).CornerRadius = UDim.new(0, 4)
+
+local DropdownMenuScroll = Instance.new("ScrollingFrame")
+DropdownMenuScroll.Size = UDim2.new(1, -20, 0, 140)
+DropdownMenuScroll.Position = UDim2.new(0, 10, 0, 95)
+DropdownMenuScroll.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+DropdownMenuScroll.BorderColor3 = Color3.fromRGB(80, 80, 100)
+DropdownMenuScroll.BorderSizePixel = 1
+DropdownMenuScroll.ScrollBarThickness = 4
+DropdownMenuScroll.ZIndex = 50
+DropdownMenuScroll.Visible = false
+DropdownMenuScroll.Parent = CfgCard
+local DropdownMenuLayout = Instance.new("UIListLayout")
+DropdownMenuLayout.Padding = UDim.new(0, 2)
+DropdownMenuLayout.Parent = DropdownMenuScroll
+
+-- Log area
+local LogOuter = Instance.new("Frame")
+LogOuter.Size = UDim2.new(1, 0, 1, -255)
+LogOuter.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+LogOuter.BorderSizePixel = 0
+LogOuter.ZIndex = 1
+LogOuter.Parent = Body
+Instance.new("UICorner", LogOuter).CornerRadius = UDim.new(0, 8)
+
+local LogTitle = Instance.new("TextLabel")
+LogTitle.Size = UDim2.new(1, 0, 0, 20)
+LogTitle.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+LogTitle.Text = " Console Log  (instance #" .. instanceEntry.slot .. ")"
+LogTitle.TextColor3 = Color3.fromRGB(160, 160, 200)
+LogTitle.Font = Enum.Font.GothamBold
+LogTitle.TextSize = 11
+LogTitle.TextXAlignment = Enum.TextXAlignment.Left
+LogTitle.BorderSizePixel = 0
+LogTitle.ZIndex = 2
+LogTitle.Parent = LogOuter
+Instance.new("UICorner", LogTitle).CornerRadius = UDim.new(0, 8)
+
+local LogScroll = Instance.new("ScrollingFrame")
+LogScroll.Size = UDim2.new(1, -6, 1, -24)
+LogScroll.Position = UDim2.new(0, 3, 0, 22)
+LogScroll.BackgroundTransparency = 1
+LogScroll.ScrollBarThickness = 3
+LogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+LogScroll.ZIndex = 2
+LogScroll.Parent = LogOuter
+
+local LogLayout = Instance.new("UIListLayout")
+LogLayout.Padding = UDim.new(0, 1)
+LogLayout.Parent = LogScroll
+
+
+-- ================================================================
+-- KATEGORI 6 : HELPER FUNCTIONS
+-- ================================================================
+local function addLog(msg, color)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -4, 0, 13)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = os.date("%H:%M:%S") .. " " .. msg
+    lbl.TextColor3 = color or Color3.fromRGB(180, 180, 180)
+    lbl.Font = Enum.Font.Code
+    lbl.TextSize = 10
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 3
+    lbl.Parent = LogScroll
+    table.insert(logLines, lbl)
+    if #logLines > MAX_LOG then
+        logLines[1]:Destroy()
+        table.remove(logLines, 1)
+    end
+    task.defer(function()
+        LogScroll.CanvasPosition = Vector2.new(0, math.huge)
+    end)
+end
+
+local function applyWaveControlVisual()
+    if CONFIG.WaveControl then
+        WaveControlToggle.Text       = "Wave Auto: [ON]  " .. CONFIG.StartWave .. " -> " .. CONFIG.StopWave
+        WaveControlToggle.TextColor3 = Color3.fromRGB(100, 255, 100)
+    else
+        WaveControlToggle.Text       = "Wave Auto: [OFF]"
+        WaveControlToggle.TextColor3 = Color3.fromRGB(200, 100, 100)
+    end
+end
+applyWaveControlVisual()
+
+-- ================================================================
+-- KATEGORI 6.A : MULTI-INSTANCE LAYOUT FUNCTIONS
+-- ================================================================
+refreshHeaderText = function()
+    local total = #Registry.instances
+    InstanceInfoText.Text = "Instance #" .. instanceEntry.slot .. " / Total: " .. total
+    TitleLabel.Text       = "Auto Upgrade V2  #" .. instanceEntry.slot .. " (of " .. total .. ")"
+    LogTitle.Text         = " Console Log  (instance #" .. instanceEntry.slot .. ")"
+end
+
+updateBadgeText = function()
+    BadgeNumber.Text  = tostring(instanceEntry.slot)
+    BadgeSubText.Text = (CONFIG.TargetUnits[1] or "?"):sub(1, 9)
+end
+
+relayoutAllInstances = function()
+    -- panggil setiap instance untuk re-apply posisi badge sesuai slot baru
+    for newSlot, inst in ipairs(Registry.instances) do
+        inst.slot = newSlot
+        if inst.onSlotChanged then
+            -- jangan biarkan satu instance jelek bikin yg lain crash
+            pcall(inst.onSlotChanged, newSlot)
+        end
+    end
+end
+
+-- callback ketika slot saya berubah (karena instance lain ditutup)
+instanceEntry.onSlotChanged = function(newSlot)
+    instanceEntry.slot = newSlot
+    refreshHeaderText()
+    updateBadgeText()
+    applyMode(true)  -- animasikan ke posisi baru
+end
+
+-- minta semua instance refresh header (karena total berubah saat saya lahir)
+for _, inst in ipairs(Registry.instances) do
+    if inst.id ~= MY_ID and inst.onSlotChanged then
+        pcall(inst.onSlotChanged, inst.slot)  -- akan trigger refreshHeaderText di mereka
+    end
+end
+
+-- terapkan mode awal
+applyMode(false)
+refreshHeaderText()
+updateBadgeText()
+
+-- klik badge -> expand
+BadgeLayer.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        if isMinimized then
+            isMinimized = false
+            instanceEntry.minimized = false
+            PanelLayer.Visible = true
+            BadgeLayer.Visible = false
+            applyMode(true)
+        end
+    end
+end)
+
+
+-- ================================================================
+-- KATEGORI 7 : DRAG GUI (hanya saat panel/expand)
+-- ================================================================
+local dragging, dragInput, dragStart, startPos
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        DropdownMenuScroll.Visible = false
+        dragging   = true
+        dragStart  = input.Position
+        startPos   = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+TitleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+
+-- ================================================================
+-- KATEGORI 8 : UI DATA GETTERS
+-- ================================================================
+local function getUnitScrollingFrame()
+    local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+    local gg      = pGui   and pGui:FindFirstChild("GameGui")
+    local screen  = gg     and gg:FindFirstChild("Screen")
+    local middle  = screen and screen:FindFirstChild("Middle")
+    local um      = middle and middle:FindFirstChild("UnitManager")
+    local items1  = um     and um:FindFirstChild("Items")
+    local frame   = items1 and items1:FindFirstChild("Frame")
+    local items2  = frame  and frame:FindFirstChild("Items")
+    local items3  = items2 and items2:FindFirstChild("Items")
+    return items3 and items3:FindFirstChild("ScrollingFrame")
+end
+
+local function isUIMaxLevel(uiFrame)
+    local btn      = uiFrame:FindFirstChild("Button")
+    local f1       = btn      and btn:FindFirstChild("Frame")
+    local f2       = f1       and f1:FindFirstChild("Frame")
+    local icon     = f2       and f2:FindFirstChild("UnitIcon")
+    local lvlLabel = icon     and icon:FindFirstChild("Level")
+
+    if lvlLabel and lvlLabel:IsA("TextLabel") then
+        local txt    = lvlLabel.Text
+        local numStr = string.match(txt, "%d+")
+        if numStr and tonumber(numStr) >= CONFIG.MaxLevel then return true end
+        if string.match(string.lower(txt), "max") then return true end
+    end
+    return false
+end
+
+
+-- ================================================================
+-- KATEGORI 9 : DROPDOWN TARGET
+-- ================================================================
+local function refreshTargetBtnText()
+    local count = #CONFIG.TargetUnits
+    if count == 0 then
+        TargetDropdownBtn.Text = "Pilih Unit Target (0 Terpilih)"
+    elseif count == 1 then
+        TargetDropdownBtn.Text = "Target: " .. CONFIG.TargetUnits[1]
+    else
+        TargetDropdownBtn.Text = "Target: " .. count .. " Unit Terpilih"
+    end
+    updateBadgeText()
+end
+
+local function updateDropdownList()
+    for _, child in ipairs(DropdownMenuScroll:GetChildren()) do
+        if child:IsA("GuiButton") or child:IsA("TextLabel") then
+            child:Destroy()
+        end
+    end
+
+    local uniqueUnits = {}
+    local sf          = getUnitScrollingFrame()
+    if sf then
+        for _, child in ipairs(sf:GetChildren()) do
+            if child:IsA("Frame") and child.Name ~= "Template" and child.Visible
+               and not uniqueUnits[child.Name] then
+                uniqueUnits[child.Name] = true
+            end
+        end
+    end
+
+    local count = 0
+    for unitName, _ in pairs(uniqueUnits) do
+        count = count + 1
+        local isSelected = table.find(CONFIG.TargetUnits, unitName) ~= nil
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 25)
+        btn.BackgroundColor3 = isSelected and Color3.fromRGB(60, 120, 60) or Color3.fromRGB(40, 40, 55)
+        btn.Text = "  " .. unitName
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 11
+        btn.BorderSizePixel = 0
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.ZIndex = 51
+        btn.Parent = DropdownMenuScroll
+
+        btn.MouseButton1Click:Connect(function()
+            local idx = table.find(CONFIG.TargetUnits, unitName)
+            if idx then
+                table.remove(CONFIG.TargetUnits, idx)
+                btn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+            else
+                table.insert(CONFIG.TargetUnits, unitName)
+                btn.BackgroundColor3 = Color3.fromRGB(60, 120, 60)
+            end
+            refreshTargetBtnText()
+        end)
+    end
+
+    if count == 0 then
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, 0, 0, 25)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = "Tidak ada unit di dalam UI!"
+        lbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = 11
+        lbl.ZIndex = 51
+        lbl.Parent = DropdownMenuScroll
+    end
+
+    task.delay(0.05, function()
+        DropdownMenuScroll.CanvasSize =
+            UDim2.new(0, 0, 0, DropdownMenuLayout.AbsoluteContentSize.Y + 5)
+    end)
+end
+
+TargetDropdownBtn.MouseButton1Click:Connect(function()
+    DropdownMenuScroll.Visible = not DropdownMenuScroll.Visible
+    if DropdownMenuScroll.Visible then
+        updateDropdownList()
+    end
+end)
+
+task.spawn(function()
+    while task.wait(2) do
+        if not ScreenGui.Parent then break end
+        if DropdownMenuScroll.Visible then
+            updateDropdownList()
+        end
+        refreshTargetBtnText()
+    end
+end)
+
+
+-- ================================================================
+-- KATEGORI 10 : AUTO WAVE DETECTOR
+-- ================================================================
+local function getWaveText()
+    local pGui    = LocalPlayer:FindFirstChild("PlayerGui")
+    local ggn     = pGui    and pGui:FindFirstChild("GameGuiNoInset")
+    local screen  = ggn     and ggn:FindFirstChild("Screen")
+    local top     = screen  and screen:FindFirstChild("Top")
+    local info    = top     and top:FindFirstChild("GameInfo")
+    local content = info    and info:FindFirstChild("Content")
+    local waves   = content and content:FindFirstChild("Waves")
+    local title   = waves   and waves:FindFirstChild("Title")
+    return title and title.Text or nil
+end
+
+task.spawn(function()
+    while task.wait(1) do
+        if not ScreenGui.Parent then break end
+        local curWaveText = getWaveText()
+        if curWaveText and curWaveText ~= "" then
+            WaveTextDisplay.Text = "Wave: " .. curWaveText
+            local extractedNumStr = string.match(curWaveText, "Wave%s*(%d+)")
+            if extractedNumStr then
+                local currentWaveNum = tonumber(extractedNumStr)
+                if currentWaveNum ~= lastWaveNum then
+                    lastWaveNum = currentWaveNum
+                    if CONFIG.WaveControl then
+                        if currentWaveNum >= CONFIG.StartWave and currentWaveNum < CONFIG.StopWave
+                           and not isRunning and not hasAutoStarted then
+                            hasAutoStarted = true
+                            addLog("Wave " .. currentWaveNum .. " >= StartWave " .. CONFIG.StartWave
+                                   .. " : Auto-Start ON", Color3.fromRGB(100, 255, 100))
+                            toggleScript()
+                        elseif currentWaveNum >= CONFIG.StopWave and isRunning and not hasAutoStopped then
+                            hasAutoStopped = true
+                            addLog("Wave " .. currentWaveNum .. " >= StopWave " .. CONFIG.StopWave
+                                   .. " : Auto-Stop ON", Color3.fromRGB(255, 100, 100))
+                            toggleScript()
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+
+-- ================================================================
+-- KATEGORI 11 : CORE LOGIC (TARGET & MAX-LEVEL CHECKER)
+-- ================================================================
+local UpgradeRemote = ReplicatedStorage:WaitForChild("RemoteFunctions"):WaitForChild("UpgradeUnit")
+
+runUpgrader = function()
+    addLog("Sistem Upgrade #" .. instanceEntry.slot .. " dimulai!", Color3.fromRGB(100, 255, 100))
+
+    while isRunning do
+        local mapFolder      = workspace:FindFirstChild("Map")
+        local entitiesFolder = mapFolder and mapFolder:FindFirstChild("Entities")
+        local sfUI           = getUnitScrollingFrame()
+
+        if not entitiesFolder or not sfUI then
+            task.wait(CONFIG.UpgradeInterval)
+            continue
+        end
+
+        local totalMaxFiltered = 0
+        local totalNeedUpgrade = 0
+
+        for _, targetName in ipairs(CONFIG.TargetUnits) do
+            if not isRunning then break end
+
+            local wsUnits = {}
+            for _, unit in pairs(entitiesFolder:GetChildren()) do
+                if unit.Name == targetName then
+                    local id = unit:GetAttribute("ID")
+                    if id then table.insert(wsUnits, id) end
+                end
+            end
+
+            local uiFrames = {}
+            for _, child in ipairs(sfUI:GetChildren()) do
+                if child.Name == targetName then
+                    table.insert(uiFrames, child)
+                end
+            end
+
+            local toUpgradeIDs = {}
+            for i = 1, #wsUnits do
+                local isMax = false
+                if uiFrames[i] then isMax = isUIMaxLevel(uiFrames[i]) end
+                if isMax then
+                    totalMaxFiltered = totalMaxFiltered + 1
+                else
+                    table.insert(toUpgradeIDs, wsUnits[i])
+                end
+            end
+
+            totalNeedUpgrade = totalNeedUpgrade + #toUpgradeIDs
+
+            if #toUpgradeIDs > 0 then
+                addLog("Upgrading [" .. targetName .. "] (" .. #toUpgradeIDs .. " unit)",
+                       Color3.fromRGB(100, 200, 255))
+                for _, id in ipairs(toUpgradeIDs) do
+                    if not isRunning then break end
+                    task.spawn(function()
+                        pcall(function() UpgradeRemote:InvokeServer(id) end)
+                    end)
+                end
+            end
+        end
+
+        CountText.Text = "Butuh Upg: " .. totalNeedUpgrade .. " | Selesai (Max): " .. totalMaxFiltered
+        task.wait(CONFIG.UpgradeInterval)
+    end
+end
+
+toggleScript = function()
+    if isRunning then
+        -- ====== BERHENTI ======
+        isRunning = false
+        instanceEntry.isRunning = false
+        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+        StatusText.Text  = "Status: Mati"
+        StatusText.TextColor3 = Color3.fromRGB(200, 200, 200)
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 60)
+        ToggleBtn.Text = "MULAI UPGRADE"
+        BadgeStatusDot.BackgroundColor3 = Color3.fromRGB(120, 120, 120)
+        addLog("Script #" .. instanceEntry.slot .. " dihentikan.", Color3.fromRGB(255, 100, 100))
+    else
+        -- ====== MULAI ======
+        if #CONFIG.TargetUnits == 0 then
+            addLog("Pilih minimal 1 Target Unit di Dropdown!", Color3.fromRGB(255, 100, 100))
+            return
+        end
+        isRunning = true
+        instanceEntry.isRunning = true
+        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 220, 80)
+        StatusText.Text  = "Status: Upgrading..."
+        StatusText.TextColor3 = Color3.fromRGB(100, 255, 100)
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+        ToggleBtn.Text = "HENTIKAN UPGRADE"
+        BadgeStatusDot.BackgroundColor3 = Color3.fromRGB(80, 220, 80)
+        scriptThread = task.spawn(runUpgrader)
+    end
+end
+ToggleBtn.MouseButton1Click:Connect(function() toggleScript() end)
+
+
+-- ================================================================
+-- KATEGORI 12 : SETTINGS INPUT HANDLERS
+-- ================================================================
+StartWaveBox.FocusLost:Connect(function()
+    local num = tonumber(StartWaveBox.Text)
+    if num then
+        CONFIG.StartWave = num
+        hasAutoStarted = false
+        applyWaveControlVisual()
+    else
+        StartWaveBox.Text = tostring(CONFIG.StartWave)
+    end
+end)
+
+StopWaveBox.FocusLost:Connect(function()
+    local num = tonumber(StopWaveBox.Text)
+    if num then
+        CONFIG.StopWave = num
+        hasAutoStopped = false
+        applyWaveControlVisual()
+    else
+        StopWaveBox.Text = tostring(CONFIG.StopWave)
+    end
+end)
+
+MaxLvlBox.FocusLost:Connect(function()
+    local num = tonumber(MaxLvlBox.Text)
+    if num then
+        CONFIG.MaxLevel = num
+    else
+        MaxLvlBox.Text = tostring(CONFIG.MaxLevel)
+    end
+    addLog("Max Lvl disetel ke: " .. CONFIG.MaxLevel, Color3.fromRGB(200, 255, 100))
+end)
+
+WaveControlToggle.MouseButton1Click:Connect(function()
+    CONFIG.WaveControl = not CONFIG.WaveControl
+    hasAutoStarted = false
+    hasAutoStopped = false
+    applyWaveControlVisual()
+end)
+
+DelayMinus.MouseButton1Click:Connect(function()
+    CONFIG.UpgradeInterval = math.max(0.01, math.floor((CONFIG.UpgradeInterval - 0.5) * 100 + 0.5) / 100)
+    DelayLabel.Text = "Jeda: " .. CONFIG.UpgradeInterval .. "s"
+end)
+DelayPlus.MouseButton1Click:Connect(function()
+    CONFIG.UpgradeInterval = math.floor((CONFIG.UpgradeInterval + 0.5) * 100 + 0.5) / 100
+    DelayLabel.Text = "Jeda: " .. CONFIG.UpgradeInterval .. "s"
+end)
+
+-- ====== Tombol Close: bersihkan registry & re-layout ======
+local function destroySelf()
+    isRunning = false
+    -- hapus dari registry
+    for i, inst in ipairs(Registry.instances) do
+        if inst.id == MY_ID then
+            table.remove(Registry.instances, i)
+            break
+        end
+    end
+    -- minta sisa instance re-layout (slot mereka maju 1)
+    relayoutAllInstances()
+    -- minta sisa instance refresh header total
+    for _, inst in ipairs(Registry.instances) do
+        if inst.onSlotChanged then
+            pcall(inst.onSlotChanged, inst.slot)
+        end
+    end
+    if ScreenGui and ScreenGui.Parent then
+        ScreenGui:Destroy()
+    end
+end
+instanceEntry.destroy = destroySelf
+
+CloseBtn.MouseButton1Click:Connect(destroySelf)
+
+-- ====== Tombol Minimize: kembalikan ke badge ======
+MinBtn.MouseButton1Click:Connect(function()
+    isMinimized = true
+    instanceEntry.minimized = true
+    DropdownMenuScroll.Visible = false
+    -- hide panel sebelum animasi shrink supaya badge keliatan bersih
+    PanelLayer.Visible = false
+    BadgeLayer.Visible = true
+    applyMode(true)
+end)
+
+
+-- ================================================================
+-- INISIALISASI AKHIR
+-- ================================================================
+refreshTargetBtnText()
+updateDropdownList()
+
+addLog("Auto Upgrade V2 #" .. instanceEntry.slot .. " loaded. Target=" ..
+       table.concat(CONFIG.TargetUnits, ",") .. " | Total instance=" ..
+       #Registry.instances, Color3.fromRGB(150, 220, 255))
+
+-- Auto start jika config minta
+if CONFIG.AutoStart and not CONFIG.WaveControl then
+    -- Auto-start hanya jika WaveControl off, kalau on biar wave detector yg trigger
+    task.delay(0.2, function()
+        if not isRunning and #CONFIG.TargetUnits > 0 then
+            toggleScript()
+        end
+    end)
+end
+
+print(("[Auto Upgrade V2] Instance #%d loaded. Target=%s. Total active=%d.")
+    :format(instanceEntry.slot, table.concat(CONFIG.TargetUnits, ","), #Registry.instances))
