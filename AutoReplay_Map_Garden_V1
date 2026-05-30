@@ -1,0 +1,1280 @@
+-- ==========================================================
+-- AUTO REPLAY MAP GRAVE V2
+-- Hasil penggabungan: AutoReplay_Map_Grave_V1  +  SkipV9
+-- ==========================================================
+-- AutoReplay_Map_Grave_V1 TIDAK diubah/dirusak. File ini
+-- adalah file BARU yang menggabungkan kedua script jadi satu
+-- panel GUI. Cukup eksekusi 1 file ini saja, semua jalan.
+--
+-- FITUR LENGKAP:
+--   [A] Auto Skip   (dari SkipV9)
+--   [B] Manual Skip Wave (dari SkipV9)
+--   [C] Game Speed 1x / 2x / 3x (dari SkipV9, klik UI bukan
+--                                 InvokeServer -> aman)
+--   [D] Auto Jalan (Anti AFK loop waypoints, dari SkipV9)
+--       + WaypointDelay, LapDelay, DelayJitter
+--   [E] Auto Replay (dari AutoReplay_Map_Grave_V1 / V5):
+--       - Klik Play Again di GameEnd (3-method virtualClick)
+--       - Vote DifficultyVote + InvokeServer RestartGame
+--       - Randomness Pool: tiap N kelipatan game, difficulty
+--         dipilih random dari pool
+--
+--   GUI: single panel pakai pattern AutoReplayV5/SkipV7
+--   (parent ke CoreGui, tanpa Active/ZIndex/IgnoreGuiInset).
+--   Bisa drag, minimize, close. Layout dibagi jadi section.
+-- ==========================================================
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                       CONFIGURATION                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+
+-- ── [KATEGORI 1] FITUR SKIP ────────────────────────────────
+-- Pengaturan tombol skip di game (Auto Skip & Manual Skip Wave).
+local Config = {
+    AutoSkip   = true,    -- true = saat eksekusi langsung NYALAKAN tombol "Auto Skip" di game (klik kalau lagi Off). false = jangan otak-atik.
+    ManualSkip = true,    -- true = saat eksekusi otomatis klik "Skip Wave >>" tiap kali frame SkipWave muncul. false = nonaktif.
+}
+
+-- ── [KATEGORI 2] GAME SPEED (Tick Speed) ───────────────────
+-- Speed gameplay yang langsung di-apply saat eksekusi.
+local SpeedConfig = {
+    GameSpeed  = 2,       -- 1 / 2 / 3 (max 3x). Di-apply otomatis SEKALI di awal + tiap round baru. Implementasi: KLIK tombol TickSpeed.Items.{N} pakai firesignal (BUKAN InvokeServer ChangeTickSpeed -> aman dari crash V2).
+}
+
+-- ── [KATEGORI 3] AUTO JALAN (Anti AFK) ─────────────────────
+-- Karakter otomatis jalan keliling waypoints supaya gak ke-kick AFK.
+local AutoJalanConfig = {
+
+    AutoJalan    = true,                -- true = langsung mulai JALAN saat eksekusi. false = nonaktif di awal (masih bisa dinyalakan via GUI).
+    StartDelay   = 10,                  -- detik. Jeda sebelum mulai jalan (kasih waktu game & karakter loading).
+    PlaceIdGuard = 123516946198836,     -- ID place yang valid untuk auto jalan. Set 0 untuk matikan guard (jalan di place manapun).
+    Loop         = true,                -- true = ulang terus titik-titik (anti AFK forever). false = jalan SEKALI putaran saja lalu stop.
+    MoveTimeout  = 30,                  -- detik. Timeout per-waypoint. Kalau lebih dari ini gak nyampe (nyangkut), lanjut waypoint berikutnya.
+    ArriveDist   = 5,                   -- studs. Jarak dianggap "sampai" di waypoint (biar gak nungguin tepat di koordinat).
+
+    -- ── Delay antar pergerakan ─────────────────────────────
+    WaypointDelay = 0.5,                -- detik. Jeda SETELAH sampai di SATU waypoint sebelum lanjut ke waypoint berikutnya. Set 0 = tanpa jeda.
+    LapDelay      = 1.0,                -- detik. Jeda SETELAH selesai SATU putaran (semua waypoint) sebelum mulai putaran berikutnya. Hanya berlaku kalau Loop=true.
+    DelayJitter   = 0,                  -- detik. Nilai random TAMBAHAN ke WaypointDelay & LapDelay (anti-pattern). 0 = matikan jitter.
+
+    -- ── Daftar titik tujuan ──────────────────────────────
+    -- Format: CFrame.new(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+    -- (12 angka: 3 posisi + 9 matriks rotasi). Tinggal tambah/hapus baris.
+    Waypoints = {
+        --         X            Y           Z       |  rotation matrix (9 angka)                                                                                                                            | label
+        CFrame.new(-354.903259, 65.0672607, -107.671249, 0.694788635, -6.42631903e-08, -0.719213963, -1.60227334e-08, 1, -1.04830562e-07, 0.719213963, 8.43588595e-08, 0.694788635  ), -- Tujuan a
+        CFrame.new(-358.53598, 65.0672607, -145.132614, 0.607176363, -5.04204678e-09, 0.794567108, -6.8238414e-08, 1, 5.84907163e-08, -0.794567108, -8.97341792e-08, 0.607176363  ), -- Tujuan b
+        CFrame.new(-334.566254, 65.0672607, -167.642136, 0.874698341, -2.78509695e-08, -0.484667748, -1.2325331e-08, 1, -7.97080446e-08, 0.484667748, 7.56941816e-08, 0.874698341  ), -- Tujuan 1
+        CFrame.new(-299.247711, 65.0672607, -166.908569, 0.350239724, 8.05602838e-08, -0.936660111, -1.15703012e-08, 1, 8.16816126e-08, 0.936660111, -1.7770704e-08, 0.350239724   ), -- Tujuan 2
+        CFrame.new(-307.020142, 65.0672607, -130.818604, -0.933912754, 5.54363204e-08, 0.357501, 4.4837428e-08, 1, -3.7935763e-08, -0.357501, -1.93992662e-08, -0.933912754  ), -- Tujuan 3
+        CFrame.new(-337.819855, 65.1172562, -114.249588, -0.382552236, -5.61690285e-08, -0.923933864, 6.22806766e-08, 1, -8.65804779e-08, 0.923933864, -9.0664777e-08, -0.382552236  ), -- Tujuan 4
+    },
+
+}
+
+-- ── [KATEGORI 4] AUTO REPLAY (dari Map_Grave_V1) ───────────
+-- Auto klik Play Again + Vote difficulty + RestartGame.
+local ReplayConfig = {
+
+    AutoStart       = true,            -- true = Auto Replay langsung "ON" saat di-load. false = harus toggle manual via GUI.
+    TargetDif       = "dif_easy",-- Difficulty default yang di-vote saat NORMAL (bukan ronde random). Map Grave biasanya "dif_impossible". Pilihan: dif_easy / dif_normal / dif_hard / dif_insane / dif_impossible / dif_apocalypse.
+
+    LoopInterval    = 0.4,             -- detik. Jeda antar iterasi loop Replay. Kecil = responsif tapi berat.
+    CooldownAgain   = 1.5,             -- detik. Jeda minimum antar percobaan klik tombol "Play Again".
+    CooldownVote    = 4,               -- detik. Jeda minimum antar fire vote+RestartGame. Cegah double-fire saat UI kedip.
+    ClickVerifyT    = 0.8,             -- detik. Setelah klik Play Again, tunggu segini lalu cek apakah GameEnd benar-benar hilang.
+
+    -- ── Randomness mode ────────────────────────────────────
+    RandomnessEnabled  = true,         -- true = aktifkan fitur random. false = ronde normal terus, TargetDif dipakai semua.
+    RandomnessInterval = 5,            -- jumlah gameplay. 5 = tiap kelipatan 5 (game ke-5, 10, ...) difficulty di-random. Isi 1 = setiap game random.
+    RandomnessPool     = {             -- List difficulty yang BOLEH dipakai saat ronde random. Edit sesuai selera.
+        --"dif_easy",                    --   easy        | mode termudah
+        "dif_normal",                  --   normal      | mode standar
+        "dif_hard",                    --   hard        | mode susah
+        "dif_insane",                  --   insane      | mode sangat susah
+        --"dif_impossible",            --   impossible  | uncomment kalau mau dipakai di pool random
+        --"dif_apocalypse",            --   apocalypse  | uncomment kalau mau dipakai di pool random
+    },
+    RandomnessAvoidRepeat = false,     -- true = hindari hasil random sama dengan ronde random sebelumnya (kalau pool >= 2). false = boleh sama berulang.
+
+    AllowVIMForReplay  = true,         -- true = boleh pakai VirtualInputManager untuk klik Play Again (3-method fallback). Replay V1 pakai ini & work. false = no VIM (anti macro flag tapi mungkin Play Again gak ke-klik).
+
+}
+
+-- ── [KATEGORI 5] DIFFICULTY MASTER LIST (jangan diubah kecuali game update) ──
+local DIFFICULTIES = {
+    "dif_easy",                        --   easy
+    "dif_normal",                      --   normal
+    "dif_hard",                        --   hard
+    "dif_insane",                      --   insane
+    "dif_impossible",                  --   impossible
+    "dif_apocalypse",                  --   apocalypse
+}
+
+-- ── [KATEGORI 6] LOOP TIMING (Skip) ────────────────────────
+-- Kontrol seberapa cepat script ngecek state UI Skip.
+local LOOP_INTERVAL_SKIP  = 0.5   -- detik. Jeda antar iterasi loop utama Skip.
+local AUTOSKIP_COOLDOWN   = 2.0   -- detik. Cooldown setelah klik AutoSkip.
+local MANUAL_COOLDOWN     = 1.2   -- detik. Cooldown klik Skip Wave (cegah double-click).
+local SPEED_APPLY_TIMEOUT = 30    -- detik. Berapa lama nungguin tombol TickSpeed muncul saat startup.
+
+-- ── [KATEGORI 7] DEBUG ─────────────────────────────────────
+local DEBUG_PRINT = true          -- true = print log ke F9 console. false = silent.
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  CLAMP / VALIDASI CONFIG                  ║
+-- ╚══════════════════════════════════════════════════════════╝
+do
+    local s = tonumber(SpeedConfig.GameSpeed) or 1
+    if s < 1 then s = 1 end
+    if s > 3 then s = 3 end
+    SpeedConfig.GameSpeed = math.floor(s)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                         SERVICES                          ║
+-- ╚══════════════════════════════════════════════════════════╝
+local CoreGui              = game:GetService("CoreGui")
+local UserInputService     = game:GetService("UserInputService")
+local ReplicatedStorage    = game:GetService("ReplicatedStorage")
+local Players              = game:GetService("Players")
+local LocalPlayer          = Players.LocalPlayer
+local PlayerGui            = LocalPlayer:WaitForChild("PlayerGui")
+local VirtualInputManager  = nil
+pcall(function() VirtualInputManager = game:GetService("VirtualInputManager") end)
+
+-- Seed RNG
+math.randomseed(tick() % 1 * 1e7 + os.time())
+
+local function dprint(...)
+    if DEBUG_PRINT then print("[GraveV2]", ...) end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                          STATE                            ║
+-- ╚══════════════════════════════════════════════════════════╝
+local isRunning            = true        -- master flag (Close ditekan -> false)
+
+-- Skip state
+local lastAutoSkipClickAt  = 0
+local lastManualClickAt    = 0
+local lastSeenWaveControls = nil
+
+-- Replay state
+local replayRunning  = ReplayConfig.AutoStart
+local lastAgainAt    = 0
+local lastVoteAt     = 0
+local clickAttempt   = 0
+local gameplayCount  = 0
+local lastVotedDif   = ReplayConfig.TargetDif
+local lastRandomDif  = nil
+
+-- AutoJalan state
+local autoJalanState = {
+    enabled = AutoJalanConfig.AutoJalan,
+    running = false,
+}
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              PATH HELPERS (Skip + Replay)                 ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function safeChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+-- Path Skip: PlayerGui.GameGuiNoInset.Screen.Top.WaveControls
+local function getWaveControls()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "WaveControls")
+end
+
+local function getAutoSkipButton()
+    return safeChild(getWaveControls(), "AutoSkip")
+end
+
+local function getSkipWaveFrame()
+    local gui = safeChild(PlayerGui, "GameGuiNoInset")
+    local scr = safeChild(gui, "Screen")
+    local top = safeChild(scr, "Top")
+    return safeChild(top, "SkipWave")
+end
+
+local function getTickSpeedButton(n)
+    local wc    = getWaveControls()
+    local tick  = safeChild(wc, "TickSpeed")
+    local items = safeChild(tick, "Items")
+    if not items then return nil end
+    return items:FindFirstChild(tostring(n))
+end
+
+-- Path Replay: PlayerGui.GameGui.Screen.Middle.GameEnd.Items.Frame.Actions.Items.Again
+local function getAgainButton()
+    local gameGui = safeChild(PlayerGui, "GameGui")
+    local screen  = safeChild(gameGui, "Screen")
+    local middle  = safeChild(screen, "Middle")
+    local gameEnd = safeChild(middle, "GameEnd")
+    local items1  = safeChild(gameEnd, "Items")
+    local frame   = safeChild(items1, "Frame")
+    local actions = safeChild(frame, "Actions")
+    local items2  = safeChild(actions, "Items")
+    local again   = safeChild(items2, "Again")
+    return again, gameEnd
+end
+
+-- Path Replay: PlayerGui.GameGui.Screen.Middle.DifficultyVote.Items.Frame.Items.Items.{difName}
+local function getDifficultyButtonByName(difName)
+    local gameGui = safeChild(PlayerGui, "GameGui")
+    local screen  = safeChild(gameGui, "Screen")
+    local middle  = safeChild(screen, "Middle")
+    local difVote = safeChild(middle, "DifficultyVote")
+    local items1  = safeChild(difVote, "Items")
+    local frame   = safeChild(items1, "Frame")
+    local items2  = safeChild(frame, "Items")
+    local items3  = safeChild(items2, "Items")
+    local btn     = safeChild(items3, difName)
+    return btn, difVote
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              REMOTE HELPERS (utk Replay)                  ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function getRemote(name)
+    local remotes = ReplicatedStorage:FindFirstChild("RemoteFunctions")
+    if not remotes then return nil end
+    return remotes:FindFirstChild(name)
+end
+
+local function invokeRemote(name, ...)
+    local r = getRemote(name)
+    if not r then
+        dprint("Remote tidak ditemukan:", name)
+        return false
+    end
+    local args = { ... }
+    local ok, err = pcall(function() r:InvokeServer(unpack(args)) end)
+    if not ok then dprint("Invoke", name, "gagal:", err) end
+    return ok
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              SAFE CLICK (no VIM untuk Skip)               ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Klik Skip & Game Speed: HANYA via firesignal/getconnections
+-- (no VIM -> anti macro flag).
+local function fireSignals(obj, signalNames)
+    if not obj then return false end
+    local fired = false
+    for _, sig in ipairs(signalNames) do
+        pcall(function()
+            local ev = obj[sig]
+            if not ev then return end
+            if typeof(getconnections) == "function" then
+                local conns = getconnections(ev)
+                if conns then
+                    for _, c in ipairs(conns) do
+                        local ok = pcall(function() c:Fire() end)
+                        if not ok and typeof(firesignal) == "function" then
+                            pcall(function() firesignal(c) end)
+                        end
+                        fired = true
+                    end
+                end
+            end
+            if (not fired) and typeof(firesignal) == "function" then
+                pcall(function() firesignal(ev) end)
+                fired = true
+            end
+        end)
+    end
+    return fired
+end
+
+local function safeClick(button)
+    if not button or not button.Parent then return false end
+    local SIGNALS = { "MouseButton1Click", "Activated" }
+    local fired = fireSignals(button, SIGNALS)
+    local title = button:FindFirstChild("Title")
+    if title and (title:IsA("TextLabel") or title:IsA("ImageLabel")
+                  or title:IsA("TextButton") or title:IsA("ImageButton")) then
+        if fireSignals(title, SIGNALS) then fired = true end
+    end
+    return fired
+end
+
+local function applyGameSpeed(n)
+    local btn = getTickSpeedButton(n)
+    if not btn then return false end
+    return safeClick(btn)
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║       VIRTUAL CLICK 3-METHOD (utk Replay - boleh VIM)     ║
+-- ╚══════════════════════════════════════════════════════════╝
+-- Replay punya tombol Play Again yang kadang butuh VIM untuk
+-- ke-fire. Ini logic 3-method dari V1 yang terbukti work.
+local function clickViaConnections(button)
+    if typeof(getconnections) ~= "function" then return false end
+    local fired = false
+    local signals = { "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }
+    for _, sig in ipairs(signals) do
+        pcall(function()
+            local ev = button[sig]
+            if ev then
+                local conns = getconnections(ev)
+                if conns then
+                    for _, c in ipairs(conns) do
+                        local ok = pcall(function() c:Fire() end)
+                        if not ok and typeof(firesignal) == "function" then
+                            pcall(function() firesignal(c) end)
+                        end
+                        fired = true
+                    end
+                end
+            end
+        end)
+    end
+    return fired
+end
+
+local function clickViaFiresignal(button)
+    if typeof(firesignal) ~= "function" then return false end
+    local signals = { "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }
+    local fired = false
+    for _, sig in ipairs(signals) do
+        pcall(function()
+            if button[sig] then
+                firesignal(button[sig])
+                fired = true
+            end
+        end)
+    end
+    return fired
+end
+
+local function clickViaVIM(button)
+    if not ReplayConfig.AllowVIMForReplay then return false end
+    if not VirtualInputManager then return false end
+    local ok = pcall(function()
+        local pos  = button.AbsolutePosition
+        local size = button.AbsoluteSize
+        local x = pos.X + size.X / 2
+        local y = pos.Y + size.Y / 2
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true,  game, 0)
+        task.wait(0.07)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end)
+    return ok
+end
+
+local function virtualClick(button, attempt)
+    if not button then return end
+    attempt = attempt or 1
+    local targets = { button }
+    local title = button:FindFirstChild("Title")
+    if title and (title:IsA("TextLabel") or title:IsA("ImageLabel")
+                  or title:IsA("TextButton") or title:IsA("ImageButton")) then
+        table.insert(targets, title)
+    end
+    for _, t in ipairs(targets) do
+        if attempt == 1 then
+            clickViaConnections(t)
+            clickViaFiresignal(t)
+        elseif attempt == 2 then
+            clickViaFiresignal(t)
+            clickViaVIM(t)
+        else
+            clickViaVIM(t)
+            clickViaConnections(t)
+            clickViaFiresignal(t)
+        end
+    end
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  AUTO JALAN HELPERS                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function getCharacterParts()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local hrp  = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 10)
+    local hum  = char:FindFirstChildOfClass("Humanoid")  or char:WaitForChild("Humanoid", 10)
+    return char, hrp, hum
+end
+
+local function walkToWaypointSafe(targetPos)
+    local char, hrp, hum = getCharacterParts()
+    if not (hrp and hum) then return false end
+    hum:MoveTo(targetPos)
+    local startTime = os.clock()
+    while autoJalanState.running and isRunning do
+        if not (hrp.Parent and hum.Parent) then return false end
+        local dist = (hrp.Position - targetPos).Magnitude
+        if dist <= AutoJalanConfig.ArriveDist then return true end
+        if (os.clock() - startTime) > AutoJalanConfig.MoveTimeout then
+            dprint("Walk timeout di", targetPos)
+            return false
+        end
+        task.wait(0.2)
+    end
+    return false
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              REPLAY: DIFFICULTY POOL HELPERS              ║
+-- ╚══════════════════════════════════════════════════════════╝
+local function isValidDif(name)
+    for _, v in ipairs(DIFFICULTIES) do
+        if v == name then return true end
+    end
+    return false
+end
+
+local function getCleanPool()
+    local seen, out = {}, {}
+    for _, v in ipairs(ReplayConfig.RandomnessPool) do
+        if isValidDif(v) and not seen[v] then
+            seen[v] = true
+            table.insert(out, v)
+        end
+    end
+    if #out == 0 then
+        dprint("RandomnessPool kosong/invalid, fallback ke semua difficulty")
+        for _, v in ipairs(DIFFICULTIES) do
+            table.insert(out, v)
+        end
+    end
+    return out
+end
+
+local function pickRandomDif()
+    local pool = getCleanPool()
+    if #pool == 1 then return pool[1] end
+    if ReplayConfig.RandomnessAvoidRepeat and lastRandomDif then
+        local candidates = {}
+        for _, v in ipairs(pool) do
+            if v ~= lastRandomDif then table.insert(candidates, v) end
+        end
+        if #candidates > 0 then
+            return candidates[math.random(1, #candidates)]
+        end
+    end
+    return pool[math.random(1, #pool)]
+end
+
+local function nextDif(cur)
+    for i, v in ipairs(DIFFICULTIES) do
+        if v == cur then return DIFFICULTIES[(i % #DIFFICULTIES) + 1] end
+    end
+    return DIFFICULTIES[1]
+end
+
+local function decideNextDif()
+    if ReplayConfig.RandomnessEnabled
+       and ReplayConfig.RandomnessInterval > 0
+       and ((gameplayCount + 1) % ReplayConfig.RandomnessInterval == 0) then
+        return pickRandomDif(), true
+    end
+    return ReplayConfig.TargetDif, false
+end
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║         GUI (pattern AutoReplayV5/SkipV7 yang work)       ║
+-- ╚══════════════════════════════════════════════════════════╝
+if CoreGui:FindFirstChild("AutoReplayMapGraveV2") then
+    CoreGui.AutoReplayMapGraveV2:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoReplayMapGraveV2"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local PANEL_W = 290
+local PANEL_H = 540
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
+MainFrame.Position = UDim2.new(1, -PANEL_W - 10, 0.5, -PANEL_H / 2)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+-- TopBar = Frame (pattern AutoReplayV5)
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 30)
+TopBar.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarCover = Instance.new("Frame")
+TopBarCover.Size = UDim2.new(1, 0, 0, 8)
+TopBarCover.Position = UDim2.new(0, 0, 1, -8)
+TopBarCover.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TopBarCover.BorderSizePixel = 0
+TopBarCover.Parent = TopBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Replay Grave V2 (+ Skip & Walk)"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 12
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = TopBar
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundTransparency = 1
+MinBtn.Text = "-"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 18
+MinBtn.Parent = TopBar
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -30)
+ContentFrame.Position = UDim2.new(0, 0, 0, 30)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+-- Helper: bikin section header label
+local function makeSection(text, posY)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.9, 0, 0, 16)
+    lbl.Position = UDim2.new(0.05, 0, 0, posY)
+    lbl.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+    lbl.BorderSizePixel = 0
+    lbl.Text = " " .. text
+    lbl.TextColor3 = Color3.fromRGB(255, 220, 120)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 10
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = ContentFrame
+    Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 4)
+    return lbl
+end
+
+-- ── SECTION SKIP ────────────────────────────────────────
+makeSection("[A] SKIP", 6)
+
+local AutoSkipBtn = Instance.new("TextButton")
+AutoSkipBtn.Size = UDim2.new(0.43, 0, 0, 26)
+AutoSkipBtn.Position = UDim2.new(0.05, 0, 0, 26)
+AutoSkipBtn.BackgroundColor3 = Config.AutoSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+AutoSkipBtn.Text = "Auto: " .. (Config.AutoSkip and "ON" or "OFF")
+AutoSkipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AutoSkipBtn.Font = Enum.Font.GothamBold
+AutoSkipBtn.TextSize = 11
+AutoSkipBtn.AutoButtonColor = false
+AutoSkipBtn.Parent = ContentFrame
+Instance.new("UICorner", AutoSkipBtn).CornerRadius = UDim.new(0, 6)
+
+local ManualSkipBtn = Instance.new("TextButton")
+ManualSkipBtn.Size = UDim2.new(0.43, 0, 0, 26)
+ManualSkipBtn.Position = UDim2.new(0.52, 0, 0, 26)
+ManualSkipBtn.BackgroundColor3 = Config.ManualSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ManualSkipBtn.Text = "Manual: " .. (Config.ManualSkip and "ON" or "OFF")
+ManualSkipBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ManualSkipBtn.Font = Enum.Font.GothamBold
+ManualSkipBtn.TextSize = 11
+ManualSkipBtn.AutoButtonColor = false
+ManualSkipBtn.Parent = ContentFrame
+Instance.new("UICorner", ManualSkipBtn).CornerRadius = UDim.new(0, 6)
+
+-- ── SECTION GAME SPEED ──────────────────────────────────
+makeSection("[B] GAME SPEED (max 3x)", 60)
+
+local Speed1Btn = Instance.new("TextButton")
+Speed1Btn.Size = UDim2.new(0, 75, 0, 26)
+Speed1Btn.Position = UDim2.new(0.05, 0, 0, 80)
+Speed1Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 1) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+Speed1Btn.Text = "1x"
+Speed1Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Speed1Btn.Font = Enum.Font.GothamBold
+Speed1Btn.TextSize = 12
+Speed1Btn.AutoButtonColor = false
+Speed1Btn.Parent = ContentFrame
+Instance.new("UICorner", Speed1Btn).CornerRadius = UDim.new(0, 6)
+
+local Speed2Btn = Instance.new("TextButton")
+Speed2Btn.Size = UDim2.new(0, 75, 0, 26)
+Speed2Btn.Position = UDim2.new(0.5, -37, 0, 80)
+Speed2Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 2) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+Speed2Btn.Text = "2x"
+Speed2Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Speed2Btn.Font = Enum.Font.GothamBold
+Speed2Btn.TextSize = 12
+Speed2Btn.AutoButtonColor = false
+Speed2Btn.Parent = ContentFrame
+Instance.new("UICorner", Speed2Btn).CornerRadius = UDim.new(0, 6)
+
+local Speed3Btn = Instance.new("TextButton")
+Speed3Btn.Size = UDim2.new(0, 75, 0, 26)
+Speed3Btn.Position = UDim2.new(0.95, -75, 0, 80)
+Speed3Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 3) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+Speed3Btn.Text = "3x"
+Speed3Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Speed3Btn.Font = Enum.Font.GothamBold
+Speed3Btn.TextSize = 12
+Speed3Btn.AutoButtonColor = false
+Speed3Btn.Parent = ContentFrame
+Instance.new("UICorner", Speed3Btn).CornerRadius = UDim.new(0, 6)
+
+local function refreshSpeedButtons()
+    Speed1Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 1) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+    Speed2Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 2) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+    Speed3Btn.BackgroundColor3 = (SpeedConfig.GameSpeed == 3) and Color3.fromRGB(60, 130, 230) or Color3.fromRGB(50, 50, 56)
+end
+
+-- ── SECTION AUTO JALAN ──────────────────────────────────
+makeSection("[C] AUTO JALAN (Anti AFK)", 114)
+
+local AutoJalanBtn = Instance.new("TextButton")
+AutoJalanBtn.Size = UDim2.new(0.9, 0, 0, 26)
+AutoJalanBtn.Position = UDim2.new(0.05, 0, 0, 134)
+AutoJalanBtn.BackgroundColor3 = autoJalanState.enabled and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+AutoJalanBtn.Text = "Auto Jalan: " .. (autoJalanState.enabled and "ON" or "OFF")
+AutoJalanBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AutoJalanBtn.Font = Enum.Font.GothamBold
+AutoJalanBtn.TextSize = 12
+AutoJalanBtn.AutoButtonColor = false
+AutoJalanBtn.Parent = ContentFrame
+Instance.new("UICorner", AutoJalanBtn).CornerRadius = UDim.new(0, 6)
+
+-- ── SECTION AUTO REPLAY ─────────────────────────────────
+makeSection("[D] AUTO REPLAY (Map Grave)", 168)
+
+local ReplayToggleBtn = Instance.new("TextButton")
+ReplayToggleBtn.Size = UDim2.new(0.9, 0, 0, 28)
+ReplayToggleBtn.Position = UDim2.new(0.05, 0, 0, 188)
+ReplayToggleBtn.BackgroundColor3 = replayRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+ReplayToggleBtn.Text = "Replay: " .. (replayRunning and "ON" or "OFF")
+ReplayToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ReplayToggleBtn.Font = Enum.Font.GothamBold
+ReplayToggleBtn.TextSize = 12
+ReplayToggleBtn.AutoButtonColor = false
+ReplayToggleBtn.Parent = ContentFrame
+Instance.new("UICorner", ReplayToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local DifBtn = Instance.new("TextButton")
+DifBtn.Size = UDim2.new(0.9, 0, 0, 24)
+DifBtn.Position = UDim2.new(0.05, 0, 0, 220)
+DifBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+DifBtn.Text = "Difficulty: " .. ReplayConfig.TargetDif
+DifBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+DifBtn.Font = Enum.Font.Gotham
+DifBtn.TextSize = 11
+DifBtn.AutoButtonColor = true
+DifBtn.Parent = ContentFrame
+Instance.new("UICorner", DifBtn).CornerRadius = UDim.new(0, 6)
+
+local RandBtn = Instance.new("TextButton")
+RandBtn.Size = UDim2.new(0.9, 0, 0, 24)
+RandBtn.Position = UDim2.new(0.05, 0, 0, 248)
+RandBtn.BackgroundColor3 = ReplayConfig.RandomnessEnabled and Color3.fromRGB(120, 90, 200) or Color3.fromRGB(70, 70, 80)
+RandBtn.Text = "Random: " .. (ReplayConfig.RandomnessEnabled and "ON" or "OFF")
+    .. " (every " .. ReplayConfig.RandomnessInterval .. ")"
+RandBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+RandBtn.Font = Enum.Font.Gotham
+RandBtn.TextSize = 11
+RandBtn.AutoButtonColor = true
+RandBtn.Parent = ContentFrame
+Instance.new("UICorner", RandBtn).CornerRadius = UDim.new(0, 6)
+
+local IntMinusBtn = Instance.new("TextButton")
+IntMinusBtn.Size = UDim2.new(0, 28, 0, 24)
+IntMinusBtn.Position = UDim2.new(0.05, 0, 0, 276)
+IntMinusBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+IntMinusBtn.Text = "-"
+IntMinusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+IntMinusBtn.Font = Enum.Font.GothamBold
+IntMinusBtn.TextSize = 14
+IntMinusBtn.Parent = ContentFrame
+Instance.new("UICorner", IntMinusBtn).CornerRadius = UDim.new(0, 6)
+
+local IntervalLbl = Instance.new("TextLabel")
+IntervalLbl.Size = UDim2.new(0.9, -60, 0, 24)
+IntervalLbl.Position = UDim2.new(0.05, 30, 0, 276)
+IntervalLbl.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+IntervalLbl.Text = "Interval: " .. ReplayConfig.RandomnessInterval
+IntervalLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+IntervalLbl.Font = Enum.Font.Gotham
+IntervalLbl.TextSize = 11
+IntervalLbl.Parent = ContentFrame
+Instance.new("UICorner", IntervalLbl).CornerRadius = UDim.new(0, 6)
+
+local IntPlusBtn = Instance.new("TextButton")
+IntPlusBtn.Size = UDim2.new(0, 28, 0, 24)
+IntPlusBtn.Position = UDim2.new(0.95, -28, 0, 276)
+IntPlusBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+IntPlusBtn.Text = "+"
+IntPlusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+IntPlusBtn.Font = Enum.Font.GothamBold
+IntPlusBtn.TextSize = 14
+IntPlusBtn.Parent = ContentFrame
+Instance.new("UICorner", IntPlusBtn).CornerRadius = UDim.new(0, 6)
+
+local PoolLbl = Instance.new("TextLabel")
+PoolLbl.Size = UDim2.new(0.9, 0, 0, 28)
+PoolLbl.Position = UDim2.new(0.05, 0, 0, 304)
+PoolLbl.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+PoolLbl.Text = "Pool: " .. table.concat(getCleanPool(), ", ")
+PoolLbl.TextColor3 = Color3.fromRGB(220, 200, 255)
+PoolLbl.Font = Enum.Font.Gotham
+PoolLbl.TextSize = 9
+PoolLbl.TextWrapped = true
+PoolLbl.TextXAlignment = Enum.TextXAlignment.Center
+PoolLbl.Parent = ContentFrame
+Instance.new("UICorner", PoolLbl).CornerRadius = UDim.new(0, 6)
+
+local CounterLbl = Instance.new("TextLabel")
+CounterLbl.Size = UDim2.new(0.9, 0, 0, 14)
+CounterLbl.Position = UDim2.new(0.05, 0, 0, 336)
+CounterLbl.BackgroundTransparency = 1
+CounterLbl.Text = "Gameplay: 0 | Last: " .. ReplayConfig.TargetDif
+CounterLbl.TextColor3 = Color3.fromRGB(180, 180, 220)
+CounterLbl.Font = Enum.Font.Gotham
+CounterLbl.TextSize = 10
+CounterLbl.TextXAlignment = Enum.TextXAlignment.Left
+CounterLbl.Parent = ContentFrame
+
+-- ── STATUS PANEL ────────────────────────────────────────
+makeSection("[STATUS]", 354)
+
+local SkipStatusLbl = Instance.new("TextLabel")
+SkipStatusLbl.Size = UDim2.new(0.9, 0, 0, 30)
+SkipStatusLbl.Position = UDim2.new(0.05, 0, 0, 374)
+SkipStatusLbl.BackgroundTransparency = 1
+SkipStatusLbl.Text = "Skip: Loading..."
+SkipStatusLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+SkipStatusLbl.Font = Enum.Font.Gotham
+SkipStatusLbl.TextSize = 10
+SkipStatusLbl.TextWrapped = true
+SkipStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+SkipStatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+SkipStatusLbl.Parent = ContentFrame
+
+local JalanStatusLbl = Instance.new("TextLabel")
+JalanStatusLbl.Size = UDim2.new(0.9, 0, 0, 30)
+JalanStatusLbl.Position = UDim2.new(0.05, 0, 0, 406)
+JalanStatusLbl.BackgroundTransparency = 1
+JalanStatusLbl.Text = "Jalan: Idle"
+JalanStatusLbl.TextColor3 = Color3.fromRGB(220, 200, 150)
+JalanStatusLbl.Font = Enum.Font.Gotham
+JalanStatusLbl.TextSize = 10
+JalanStatusLbl.TextWrapped = true
+JalanStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+JalanStatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+JalanStatusLbl.Parent = ContentFrame
+
+local ReplayStatusLbl = Instance.new("TextLabel")
+ReplayStatusLbl.Size = UDim2.new(0.9, 0, 0, 38)
+ReplayStatusLbl.Position = UDim2.new(0.05, 0, 0, 438)
+ReplayStatusLbl.BackgroundTransparency = 1
+ReplayStatusLbl.Text = "Replay: Idle"
+ReplayStatusLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+ReplayStatusLbl.Font = Enum.Font.Gotham
+ReplayStatusLbl.TextSize = 10
+ReplayStatusLbl.TextWrapped = true
+ReplayStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+ReplayStatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+ReplayStatusLbl.Parent = ContentFrame
+
+local NextLbl = Instance.new("TextLabel")
+NextLbl.Size = UDim2.new(0.9, 0, 0, 14)
+NextLbl.Position = UDim2.new(0.05, 0, 0, 480)
+NextLbl.BackgroundTransparency = 1
+NextLbl.Text = "Next: -"
+NextLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+NextLbl.Font = Enum.Font.Gotham
+NextLbl.TextSize = 10
+NextLbl.TextXAlignment = Enum.TextXAlignment.Left
+NextLbl.Parent = ContentFrame
+
+-- Status setters
+local function setSkipStatus(s)
+    SkipStatusLbl.Text = "Skip: " .. tostring(s)
+end
+local function setJalanStatus(s)
+    JalanStatusLbl.Text = "Jalan: " .. tostring(s)
+end
+local function setReplayStatus(s)
+    ReplayStatusLbl.Text = "Replay: " .. tostring(s)
+end
+
+local function refreshPoolUI()
+    PoolLbl.Text = "Pool: " .. table.concat(getCleanPool(), ", ")
+end
+
+local function refreshCounterUI()
+    CounterLbl.Text = "Gameplay: " .. gameplayCount .. " | Last: " .. lastVotedDif
+    if ReplayConfig.RandomnessEnabled and ReplayConfig.RandomnessInterval > 0 then
+        local nextNum = gameplayCount + 1
+        local untilRand = (ReplayConfig.RandomnessInterval - (gameplayCount % ReplayConfig.RandomnessInterval))
+        if untilRand == ReplayConfig.RandomnessInterval then untilRand = ReplayConfig.RandomnessInterval end
+        local isRandNext = (nextNum % ReplayConfig.RandomnessInterval == 0)
+        if isRandNext then
+            NextLbl.Text = "Next (#" .. nextNum .. "): RANDOM (from pool)"
+            NextLbl.TextColor3 = Color3.fromRGB(255, 200, 120)
+        else
+            NextLbl.Text = "Next (#" .. nextNum .. "): " .. ReplayConfig.TargetDif .. " | random in " .. untilRand
+            NextLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+        end
+    else
+        NextLbl.Text = "Next: " .. ReplayConfig.TargetDif .. " (random OFF)"
+        NextLbl.TextColor3 = Color3.fromRGB(180, 220, 180)
+    end
+end
+refreshCounterUI()
+refreshPoolUI()
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║         DRAG (PERSIS pattern AutoReplayV5/SkipV9)         ║
+-- ╚══════════════════════════════════════════════════════════╝
+local dragging, dragInput, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging  = true
+        dragStart = input.Position
+        startPos  = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+TopBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                     BUTTON HANDLERS                       ║
+-- ╚══════════════════════════════════════════════════════════╝
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentFrame.Visible = not minimized
+    MainFrame.Size = minimized and UDim2.new(0, PANEL_W, 0, 30) or UDim2.new(0, PANEL_W, 0, PANEL_H)
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    replayRunning = false
+    autoJalanState.enabled = false
+    autoJalanState.running = false
+    ScreenGui:Destroy()
+end)
+
+-- Skip toggles
+AutoSkipBtn.MouseButton1Click:Connect(function()
+    Config.AutoSkip = not Config.AutoSkip
+    AutoSkipBtn.BackgroundColor3 = Config.AutoSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    AutoSkipBtn.Text = "Auto: " .. (Config.AutoSkip and "ON" or "OFF")
+end)
+ManualSkipBtn.MouseButton1Click:Connect(function()
+    Config.ManualSkip = not Config.ManualSkip
+    ManualSkipBtn.BackgroundColor3 = Config.ManualSkip and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    ManualSkipBtn.Text = "Manual: " .. (Config.ManualSkip and "ON" or "OFF")
+end)
+
+-- Speed
+Speed1Btn.MouseButton1Click:Connect(function()
+    SpeedConfig.GameSpeed = 1
+    refreshSpeedButtons()
+    applyGameSpeed(1)
+end)
+Speed2Btn.MouseButton1Click:Connect(function()
+    SpeedConfig.GameSpeed = 2
+    refreshSpeedButtons()
+    applyGameSpeed(2)
+end)
+Speed3Btn.MouseButton1Click:Connect(function()
+    SpeedConfig.GameSpeed = 3
+    refreshSpeedButtons()
+    applyGameSpeed(3)
+end)
+
+-- Auto Jalan toggle
+AutoJalanBtn.MouseButton1Click:Connect(function()
+    autoJalanState.enabled = not autoJalanState.enabled
+    AutoJalanBtn.BackgroundColor3 = autoJalanState.enabled and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    AutoJalanBtn.Text = "Auto Jalan: " .. (autoJalanState.enabled and "ON" or "OFF")
+    if not autoJalanState.enabled then
+        autoJalanState.running = false
+        setJalanStatus("Stopped by user.")
+    end
+end)
+
+-- Replay toggle
+ReplayToggleBtn.MouseButton1Click:Connect(function()
+    replayRunning = not replayRunning
+    ReplayToggleBtn.BackgroundColor3 = replayRunning and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(200, 80, 80)
+    ReplayToggleBtn.Text = "Replay: " .. (replayRunning and "ON" or "OFF")
+    setReplayStatus(replayRunning and "Running..." or "Paused")
+end)
+
+-- Difficulty cycle
+DifBtn.MouseButton1Click:Connect(function()
+    ReplayConfig.TargetDif = nextDif(ReplayConfig.TargetDif)
+    DifBtn.Text = "Difficulty: " .. ReplayConfig.TargetDif
+    refreshCounterUI()
+end)
+
+RandBtn.MouseButton1Click:Connect(function()
+    ReplayConfig.RandomnessEnabled = not ReplayConfig.RandomnessEnabled
+    RandBtn.BackgroundColor3 = ReplayConfig.RandomnessEnabled
+        and Color3.fromRGB(120, 90, 200)
+        or  Color3.fromRGB(70, 70, 80)
+    RandBtn.Text = "Random: " .. (ReplayConfig.RandomnessEnabled and "ON" or "OFF")
+        .. " (every " .. ReplayConfig.RandomnessInterval .. ")"
+    refreshCounterUI()
+end)
+
+IntMinusBtn.MouseButton1Click:Connect(function()
+    if ReplayConfig.RandomnessInterval > 1 then
+        ReplayConfig.RandomnessInterval = ReplayConfig.RandomnessInterval - 1
+    end
+    IntervalLbl.Text = "Interval: " .. ReplayConfig.RandomnessInterval
+    RandBtn.Text = "Random: " .. (ReplayConfig.RandomnessEnabled and "ON" or "OFF")
+        .. " (every " .. ReplayConfig.RandomnessInterval .. ")"
+    refreshCounterUI()
+end)
+IntPlusBtn.MouseButton1Click:Connect(function()
+    if ReplayConfig.RandomnessInterval < 999 then
+        ReplayConfig.RandomnessInterval = ReplayConfig.RandomnessInterval + 1
+    end
+    IntervalLbl.Text = "Interval: " .. ReplayConfig.RandomnessInterval
+    RandBtn.Text = "Random: " .. (ReplayConfig.RandomnessEnabled and "ON" or "OFF")
+        .. " (every " .. ReplayConfig.RandomnessInterval .. ")"
+    refreshCounterUI()
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║   AUTO-APPLY GameSpeed di awal eksekusi (sesuai Config)   ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    local startedAt = os.clock()
+    while isRunning and (os.clock() - startedAt) < SPEED_APPLY_TIMEOUT do
+        if applyGameSpeed(SpeedConfig.GameSpeed) then
+            setSkipStatus("Initial Speed -> " .. SpeedConfig.GameSpeed .. "x ter-apply.")
+            return
+        end
+        task.wait(1)
+    end
+    setSkipStatus("Initial speed timeout. Akan retry saat round mulai.")
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                MAIN LOOP - SKIP                           ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        task.wait(LOOP_INTERVAL_SKIP)
+        if not isRunning then break end
+
+        local ok, err = pcall(function()
+            local now = os.clock()
+            local statusParts = {}
+            local wc = getWaveControls()
+
+            -- Re-apply speed saat round baru
+            if wc and wc ~= lastSeenWaveControls then
+                if lastSeenWaveControls ~= nil then
+                    dprint("Round baru, re-apply speed.")
+                    task.spawn(function()
+                        task.wait(0.5)
+                        applyGameSpeed(SpeedConfig.GameSpeed)
+                    end)
+                    table.insert(statusParts, "Re-apply " .. SpeedConfig.GameSpeed .. "x")
+                end
+                lastSeenWaveControls = wc
+            end
+
+            if not wc then
+                setSkipStatus("Standby (bukan di gameplay).")
+                return
+            end
+
+            -- AUTO SKIP
+            if Config.AutoSkip and (now - lastAutoSkipClickAt) >= AUTOSKIP_COOLDOWN then
+                local btn = getAutoSkipButton()
+                local titleLabel = btn and btn:FindFirstChild("Title")
+                local titleText = (titleLabel and titleLabel:IsA("TextLabel")) and titleLabel.Text or ""
+                if btn and string.find(string.lower(titleText), "off") then
+                    if safeClick(btn) then
+                        lastAutoSkipClickAt = os.clock()
+                        table.insert(statusParts, "AutoSkip clicked")
+                    end
+                end
+            end
+
+            -- MANUAL SKIP
+            if Config.ManualSkip and (now - lastManualClickAt) >= MANUAL_COOLDOWN then
+                local frame = getSkipWaveFrame()
+                if frame and frame.Visible then
+                    local mbtn = frame:FindFirstChild("Button")
+                    if mbtn then
+                        if safeClick(mbtn) then
+                            table.insert(statusParts, "SkipWave clicked")
+                            lastManualClickAt = os.clock()
+                        end
+                    end
+                end
+            end
+
+            if #statusParts == 0 then
+                setSkipStatus("Watching... AS=" .. tostring(Config.AutoSkip)
+                    .. " MS=" .. tostring(Config.ManualSkip)
+                    .. " Speed=" .. SpeedConfig.GameSpeed .. "x")
+            else
+                setSkipStatus(table.concat(statusParts, " | "))
+            end
+        end)
+
+        if not ok then
+            dprint("Iterasi Skip error:", err)
+        end
+    end
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║              MAIN LOOP - AUTO REPLAY                      ║
+-- ╚══════════════════════════════════════════════════════════╝
+task.spawn(function()
+    setReplayStatus(replayRunning and "Running..." or "Paused")
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        task.wait(ReplayConfig.LoopInterval)
+
+        local ok, err = pcall(function()
+            if not replayRunning then return end
+            local now = os.clock()
+
+            -- ========================================
+            -- PRIORITAS 1: GameEnd / Play Again
+            -- ========================================
+            local againBtn, gameEnd = getAgainButton()
+            if gameEnd and gameEnd.Visible == true then
+                if (now - lastAgainAt) < ReplayConfig.CooldownAgain then return end
+                if not againBtn then
+                    setReplayStatus("GameEnd visible tapi tombol Again belum ready...")
+                    return
+                end
+
+                clickAttempt = clickAttempt + 1
+                if clickAttempt > 3 then clickAttempt = 1 end
+
+                setReplayStatus(string.format("Klik Play Again (method %d)...", clickAttempt))
+                dprint("Klik Play Again, attempt =", clickAttempt)
+
+                virtualClick(againBtn, clickAttempt)
+                lastAgainAt = os.clock()
+
+                task.wait(ReplayConfig.ClickVerifyT)
+                local _, geAfter = getAgainButton()
+                if (not geAfter) or (geAfter.Visible == false) then
+                    setReplayStatus("Play Again berhasil di-klik!")
+                    clickAttempt = 0
+                else
+                    setReplayStatus(string.format("Klik gagal (method %d), retry method berikutnya...", clickAttempt))
+                end
+                return
+            end
+
+            -- ========================================
+            -- PRIORITAS 2: DifficultyVote
+            -- ========================================
+            local _, difVote = getDifficultyButtonByName(ReplayConfig.TargetDif)
+            if difVote and difVote.Visible == true then
+                if (now - lastVoteAt) < ReplayConfig.CooldownVote then return end
+
+                local chosenDif, isRandom = decideNextDif()
+                local difBtn = getDifficultyButtonByName(chosenDif)
+
+                -- Fallback kalau button difficulty random belum muncul
+                if not difBtn and chosenDif ~= ReplayConfig.TargetDif then
+                    dprint("Button " .. chosenDif .. " tidak ditemukan, fallback ke " .. ReplayConfig.TargetDif)
+                    chosenDif = ReplayConfig.TargetDif
+                    isRandom  = false
+                    difBtn    = getDifficultyButtonByName(chosenDif)
+                end
+
+                if isRandom then
+                    setReplayStatus("[RANDOM #" .. (gameplayCount + 1) .. "] Vote " .. chosenDif .. " + RestartGame...")
+                    lastRandomDif = chosenDif
+                else
+                    setReplayStatus("Vote " .. chosenDif .. " + RestartGame...")
+                end
+
+                if difBtn then
+                    virtualClick(difBtn, 1)
+                    task.wait(0.25)
+                end
+
+                invokeRemote("PlaceDifficultyVote", chosenDif)
+                task.wait(0.4)
+                local restartOk = invokeRemote("RestartGame")
+
+                lastVoteAt = os.clock()
+
+                if restartOk then
+                    gameplayCount = gameplayCount + 1
+                    lastVotedDif  = chosenDif
+                    refreshCounterUI()
+                end
+
+                setReplayStatus("RestartGame fired (" .. chosenDif .. "). Tunggu game restart...")
+                task.wait(1)
+                return
+            end
+
+            -- IDLE
+            setReplayStatus("Running... (menunggu GameEnd / DifficultyVote)")
+        end)
+
+        if not ok then
+            dprint("Iterasi Replay error:", err)
+            setReplayStatus("Error: " .. tostring(err))
+        end
+    end
+end)
+
+
+-- ╔══════════════════════════════════════════════════════════╗
+-- ║                  AUTO JALAN WORKER                        ║
+-- ╚══════════════════════════════════════════════════════════╝
+print("Jalan Bos")
+
+task.spawn(function()
+    -- Place ID guard
+    if AutoJalanConfig.PlaceIdGuard and AutoJalanConfig.PlaceIdGuard ~= 0 then
+        if game.PlaceId ~= AutoJalanConfig.PlaceIdGuard then
+            setJalanStatus("PlaceId beda (" .. tostring(game.PlaceId) .. "), Auto Jalan dinonaktifkan.")
+            return
+        end
+    end
+
+    -- Tunggu game loaded
+    repeat task.wait() until game:IsLoaded()
+    repeat task.wait() until game:GetService("Players")
+    repeat task.wait() until game:GetService("Players").LocalPlayer
+
+    setJalanStatus("Tunggu " .. AutoJalanConfig.StartDelay .. "s sebelum mulai...")
+    task.wait(AutoJalanConfig.StartDelay)
+
+    print("auto walk")
+    setJalanStatus("Siap. Menunggu toggle ON.")
+
+    while isRunning and ScreenGui and ScreenGui.Parent do
+        if autoJalanState.enabled and not autoJalanState.running then
+            autoJalanState.running = true
+            setJalanStatus("Start walking...")
+
+            local lap = 0
+            while autoJalanState.enabled and autoJalanState.running and isRunning do
+                lap = lap + 1
+                local total = #AutoJalanConfig.Waypoints
+                for i, waypoint in ipairs(AutoJalanConfig.Waypoints) do
+                    if not (autoJalanState.enabled and autoJalanState.running and isRunning) then break end
+                    setJalanStatus(string.format("Lap %d: jalan ke waypoint %d/%d", lap, i, total))
+                    walkToWaypointSafe(waypoint.Position)
+
+                    -- Jeda antar waypoint
+                    if i < total and autoJalanState.enabled and autoJalanState.running and isRunning then
+                        local jitter = (AutoJalanConfig.DelayJitter or 0) > 0
+                            and math.random() * AutoJalanConfig.DelayJitter
+                            or 0
+                        local delay = (AutoJalanConfig.WaypointDelay or 0) + jitter
+                        if delay > 0 then
+                            setJalanStatus(string.format("Lap %d: jeda %.2fs sebelum waypoint %d", lap, delay, i + 1))
+                            task.wait(delay)
+                        end
+                    end
+                end
+
+                if not AutoJalanConfig.Loop then
+                    setJalanStatus("Selesai 1 putaran (Loop=false). Stop.")
+                    autoJalanState.enabled = false
+                    autoJalanState.running = false
+                    AutoJalanBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+                    AutoJalanBtn.Text = "Auto Jalan: OFF"
+                    break
+                end
+
+                if not autoJalanState.enabled then break end
+
+                local jitterLap = (AutoJalanConfig.DelayJitter or 0) > 0
+                    and math.random() * AutoJalanConfig.DelayJitter
+                    or 0
+                local lapDelay = (AutoJalanConfig.LapDelay or 0) + jitterLap
+                setJalanStatus(string.format("Lap %d selesai. Jeda %.2fs sebelum lap berikutnya...", lap, lapDelay))
+                if lapDelay > 0 then task.wait(lapDelay) end
+            end
+
+            autoJalanState.running = false
+            if not autoJalanState.enabled then
+                setJalanStatus("Stopped.")
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+
+print(string.format(
+    "[GraveV2] Loaded. Skip(AS=%s,MS=%s) | Speed=%dx | Jalan=%s | Replay=%s,Dif=%s,Random=%s",
+    tostring(Config.AutoSkip),
+    tostring(Config.ManualSkip),
+    SpeedConfig.GameSpeed,
+    tostring(autoJalanState.enabled),
+    tostring(replayRunning),
+    ReplayConfig.TargetDif,
+    tostring(ReplayConfig.RandomnessEnabled)
+))
